@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # 入库路径默认相对于项目根目录。
     pdf_path: Path = Field(default=Path("data/菜谱_230道.pdf"), alias="PDF_PATH")
     build_dir: Path = Field(default=Path("build"), alias="BUILD_DIR")
-    low_confidence_threshold: float = Field(default=0.78, alias="LOW_CONFIDENCE_THRESHOLD")
+    low_confidence_threshold: float = Field(default=0.95, alias="LOW_CONFIDENCE_THRESHOLD")
 
 
 @lru_cache(maxsize=1) # 缓存装饰器 第一次执行时会真正读取 .env、解析配置、处理路径；之后如果用同样参数再调用，就直接返回上一次的结果，不再重复读取。

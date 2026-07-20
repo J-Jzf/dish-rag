@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Annotated
+import json
 
 import typer
 from rich.console import Console
@@ -94,6 +95,56 @@ def eval_retrieval(
     retriever = make_retriever(settings, store)
     metrics = run_retrieval_eval(retriever, eval_file, limit=limit)
     console.print(metrics)
+
+
+@app.command()
+def qdrant_preview(
+    limit: int = 5,
+    with_vectors: Annotated[
+        bool,
+        typer.Option(help="是否打印向量内容；默认不打印，因为向量通常很长。"),
+    ] = False,
+) -> None:
+    """打印 Qdrant collection 信息和前几条 point。"""
+
+    from dish_rag.config import get_settings
+    from dish_rag.storage.qdrant_store import QdrantRecipeIndex
+
+    settings = get_settings(Path.cwd())
+    qdrant = QdrantRecipeIndex(
+        settings.qdrant_url,
+        settings.qdrant_api_key,
+        settings.qdrant_collection,
+        settings.qdrant_path,
+    )
+
+    collections = qdrant.client.get_collections()
+    console.print("[bold]Collections[/bold]")
+    console.print(collections)
+
+    collection_info = qdrant.client.get_collection(collection_name=settings.qdrant_collection)
+    console.print("[bold]Collection Info[/bold]")
+    console.print(collection_info)
+
+    points, next_page = qdrant.client.scroll(
+        collection_name=settings.qdrant_collection,
+        limit=limit,
+        with_payload=True,
+        with_vectors=with_vectors,
+    )
+    preview = {
+        "collection": settings.qdrant_collection,
+        "next_page": str(next_page) if next_page else None,
+        "points": [
+            {
+                "id": point.id,
+                "payload": point.payload,
+                "vector": point.vector if with_vectors else "未打印；需要时加 --with-vectors",
+            }
+            for point in points
+        ],
+    }
+    console.print_json(json.dumps(preview, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":

@@ -55,19 +55,21 @@ class QdrantRecipeIndex:
         dense_vectors: list[list[float]],
         sparse_vectors: list[object],
     ) -> None:
-        """上传 chunk、稠密 embedding 和 BM25 稀疏向量。"""
+        """上传 chunk原文（pyload.text中）、稠密 embedding 和 BM25 稀疏向量。"""
 
         from qdrant_client import models
 
-        points: list[models.PointStruct] = []
+        points: list[models.PointStruct] = [] # 每个 Qdrant point 对应一个 chunk（相当于SQL的每一行）
         for index, chunk in enumerate(chunks):
             points.append(
                 models.PointStruct(
                     id=_stable_point_id(chunk.chunk_id),
                     vector={
-                        "dense": dense_vectors[index],
-                        "bm25": _to_sparse_vector(sparse_vectors[index]),
+                        "dense": dense_vectors[index], # chunk 文本的稠密向量，用于语义相似度检索。
+                        "bm25": _to_sparse_vector(sparse_vectors[index]), # chunk 文本的 BM25 稀疏向量，用于关键词检索。
                     },
+                    # `payload.text`：chunk 原文，用于命中后展示和溯源。
+                    # 业务元数据，用于过滤和引用。
                     payload={
                         "chunk_id": chunk.chunk_id,
                         "recipe_id": chunk.recipe_id,

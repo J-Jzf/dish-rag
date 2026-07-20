@@ -22,7 +22,7 @@ def extract_pages(pdf_path: Path) -> list[str]:
                 # `x_tolerance` 可以降低中英文混排文本被切成零散片段的概率。
                 text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
                 pages.append(text)
-        return pages
+        return pages # 返回的是一个字符串列表，pages[0] = PDF 第 1 页抽取出来的所有文字
     except Exception:
         return _extract_pages_with_pdftotext(pdf_path)
 

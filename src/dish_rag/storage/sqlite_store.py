@@ -82,9 +82,9 @@ class SQLiteStore:
     def upsert_recipes(self, recipes: Iterable[Recipe]) -> None:
         """写入或替换菜谱事实和别名。"""
 
-        with self.connect() as connection:
-            for recipe in recipes:
-                connection.execute(
+        with self.connect() as connection: # with 结束时会自动提交或关闭连接。
+            for recipe in recipes: # 遍历每一道菜
+                connection.execute( # 向 recipes 表写入一条菜谱记录
                     """
                     insert into recipes(recipe_id, name, page_start, page_end, payload_json)
                     values (?, ?, ?, ?, ?)
@@ -94,8 +94,10 @@ class SQLiteStore:
                         page_end=excluded.page_end,
                         payload_json=excluded.payload_json
                     """,
+                    # 写入的字段是菜谱编号、菜名、开始/结束页码、完整 Recipe JSON
+                    # on conflict： 如果菜谱编号已存在，则更新菜名、页码和 JSON 而不是报错
                     (
-                        recipe.recipe_id,
+                        recipe.recipe_id, # 此处给 SQL 里的 ? 填值
                         recipe.name,
                         recipe.page_start,
                         recipe.page_end,
@@ -103,7 +105,7 @@ class SQLiteStore:
                     ),
                 )
                 for alias in recipe.aliases:
-                    connection.execute(
+                    connection.execute( # 向 aliases 表写入每个别名（或英文的大小写归一化等）
                         """
                         insert into aliases(alias, recipe_id, normalized_alias)
                         values (?, ?, ?)

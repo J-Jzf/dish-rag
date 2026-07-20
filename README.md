@@ -117,6 +117,18 @@ python main.py chat "我要做宫保鸡丁，下一步怎么做？" --thread-id 
 python main.py eval-retrieval
 ```
 
+查看本地 Qdrant collection 和前几条 point：
+
+```bash
+python main.py qdrant-preview
+```
+
+如果确实想看完整向量内容，可以加：
+
+```bash
+python main.py qdrant-preview --with-vectors
+```
+
 ## 数据构建流程
 
 1. `pdf_extract.extract_pages` 从 PDF 抽文本，并保留 page number。
@@ -168,7 +180,65 @@ python main.py ingest
 
 - 人看的产物：`build/markdown/pdf_pages.md`、`build/markdown/recipes.md`、`build/review/low_confidence_recipes.md`
 - 程序事实源：`var/dish_rag.sqlite3`
+  - SQLite 可以用 DBeaver 打开，因为它是关系型数据库文件。
 - 搜索索引：`var/qdrant`
+  - 本地嵌入式 Qdrant 不太适合直接用 DBeaver 打开。
+  - 可以写 Python 小脚本查看
+  - 若使用 url，也可以用 Qdrant Dashboard
+
+概括流程：先识别pdf，按页得到文本。然后再合并页码标记+页中内容，按菜谱结构（菜名）划分出每一道菜，再按每一道菜的格式（固定字段正则匹配）解析成 Recipe，如果recipe的置信度（完整度）低于阈值，就会进入人工核查；最后按每道菜的结构字段和步骤切chunk。
+
+最终：
+- Qdrant 里只有 chunk 向量索引和 payload（向量附带的数据包--业务信息），每个点都是一个 RecipeChunk。--索引源，对每一个 chunk 做 embedding 写入 Qdrant。
+  - 因为用户问题通常是局部的（有哪些过敏源、要煮多久），如果存整道菜，向量会把原材料、步骤、过敏原、保存方式全混在一起，检索粒度太粗。
+  - 每个 Qdrant chunk 里会带菜谱级 metadata（菜肴名、种类、tags等）所以虽然 Qdrant 点是 chunk 级别，仍然知道它属于哪道菜。
+- SQLite 里保存得更完整。--事实源。
+  - recipes 表（整道菜的完整结构化事实）
+  - chunks 表（每个 chunk 的完整原文内容）
+  - aliases 表（保存菜名和别名，用于精确匹配）
+  - long_term_memory 表（长期偏好、过敏信息等）
+  - turn_traces 表（每轮可观测 trace）
+
+Qdrant 中的一个 point 大概长这样：
+
+```text
+collection: dish_recipes
+
+point:
+  id: 123456789
+  vector:
+    dense: [0.012, -0.034, 0.118, ...]
+    bm25:
+      indices: [12, 98, 305, ...]
+      values: [0.8, 1.2, 0.5, ...]
+  payload:
+    chunk_id: "001:step_02"
+    recipe_id: "001"
+    recipe_name: "宫保鸡丁"
+    field: "RecipeField.STEPS"
+    page: 3
+    step_no: 2
+    text: "酱油、香醋、糖、盐和少量清水调成碗汁"
+    cuisine: "川菜"
+    category: "热菜"
+    cooking_method: "炒"
+    difficulty: "中等"
+    time: "约 35 分钟"
+    allergens: ["大豆", "花生/坚果", "酒精"]
+    diet_tags: ["含添加糖", "辛辣"]
+```
+
+查看 Qdrant point 示例：
+
+```bash
+python main.py qdrant-preview
+```
+
+查看完整向量：
+
+```bash
+python main.py qdrant-preview --with-vectors
+```
 
 ### 用户输入到回答链路
 
@@ -197,6 +267,68 @@ python main.py chat "我要做宫保鸡丁，下一步怎么做？" --thread-id 
 15. `nodes.update_cooking_state()`：如果用户在做菜，更新当前 thread 的 `active_recipe_id`、`current_step_no`、`last_action`。一个 thread 只维护一道正在做的菜。
 16. `nodes.answer()`：基于证据生成回答，并要求带 PDF 页码、菜谱编号、字段或步骤引用。如果没有证据，不自动替换成相似菜。
 17. `nodes.persist_trace()` 和 `observability.py`：把本轮 raw query、intent、rewritten query、命中项、分数、证据判断、引用和状态变化写入 SQLite，并在 CLI 中展示。
+
+### 用户链路 demo
+
+当前实现里有“用户 Query 改写后再 embedding/检索”，没有实现“先让大模型生成假设答案，再对假设答案 embedding”的 HyDE 流程。
+
+也就是说当前是：
+
+```text
+用户原始 Query
+-> 意图识别和上下文补全
+-> Query 重写
+-> 对 rewritten_query 做 embedding
+-> 检索 Qdrant / BM25
+```
+
+不是：
+
+```text
+用户原始 Query
+-> LLM 先生成假设答案
+-> 对假设答案 embedding
+-> 检索
+```
+
+Agentic RAG 的“自主决策”主要体现在 LangGraph 节点里：
+
+- `classify_intent`：判断用户意图、是否需要检索、是否是做菜导航。
+- `rewrite_query`：根据上下文补全 Query，并检查过敏、禁忌、不辣等限制是否被保留。
+- `retrieve`：先做菜名精确匹配；菜名不存在时不自动替换，而是进入 HITL。
+- `judge_evidence`：判断检索结果是否相关且足够。
+- `update_cooking_state`：维护当前 thread 正在做哪道菜、做到第几步。
+- `answer`：根据证据回答；没有证据时拒绝编造或自动替换。
+
+示例 1：用户问“宫保鸡丁怎么做”
+
+```text
+用户 Query：宫保鸡丁怎么做
+-> classify_intent 识别为菜谱查询/做法查询，并抽取菜名“宫保鸡丁”
+-> rewrite_query 可能改写成“宫保鸡丁的原材料和完整步骤做法”
+-> retrieve 先查 SQLite aliases，精确命中 recipe_id=001
+-> 用 recipe_id=001 作为过滤条件检索 Qdrant chunk
+-> 通常会命中 ingredients 和多个 steps chunk
+-> Evidence Judge 判断证据是否足够
+-> answer 输出原材料和步骤，并附引用
+```
+
+更理想的增强方向是：当系统判断用户问的是“整道菜怎么做”，且菜名精确命中时，可以直接从 SQLite `recipes` 表取整道菜的 `ingredients + steps`，再用 Qdrant chunk 作为辅助证据。这样比只依赖 top-k chunk 更稳。
+
+示例 2：用户问“宫保鸡丁的第二步是什么”
+
+```text
+用户 Query：宫保鸡丁的第二步是什么
+-> classify_intent 识别为字段/步骤查询，并抽取菜名“宫保鸡丁”
+-> rewrite_query 改写时保留“第二步”这个关键约束
+-> retrieve 先查 SQLite aliases，精确命中 recipe_id=001
+-> 用 recipe_id=001 过滤 Qdrant chunk
+-> 检索目标更集中，应该优先命中 step_02 或与第二步最相关的步骤 chunk
+-> Evidence Judge 判断命中步骤是否足够
+-> answer 只回答第二步，并附引用
+```
+
+这两个问题的区别是：前者是整道菜做法，应该尽量返回完整原材料和全部步骤；后者是步骤级问题，应该精确返回某一个步骤 chunk。
 
 ### 用户输入到检索调试链路
 
@@ -239,6 +371,31 @@ python main.py search "麻婆豆腐有哪些过敏原"
 19. `agent/graph.py`：看节点如何连接成完整 LangGraph。
 20. `observability.py`：看每一轮可观测 trace 如何展示。
 21. `eval/offline.py` 和 `configs/eval_queries.jsonl`：看离线检索指标如何计算。
+
+## Agentic RAG 自主决策体现
+
+本项目不是“用户问一句就固定检索一次”的普通 RAG，而是用 LangGraph 把多个判断节点串起来。自主决策主要体现在这些地方：
+
+- 是否拒答：`safety.py` 和 `nodes.classify_intent()` 会先判断请求是否涉及高风险或医疗化内容。
+- 判断用户意图：`nodes.classify_intent()` 会判断用户是在查菜谱、问字段、开始做菜、问下一步、更新偏好，还是普通闲聊。
+- 是否需要检索：意图识别结果里有 `needs_retrieval`，不需要检索的问题不会强行走向量库。
+- 上下文补全：如果用户说“它下一步怎么做”，系统会结合当前 thread 的烹饪状态补全“它”指哪道菜。
+- 菜谱实体解析：系统会抽取 Query 里的菜名实体，比如“宫保鸡丁”。
+- Query 重写：`nodes.rewrite_query()` 会把原始问题改写成更适合检索的 Query。
+- 约束保护：重写时不能删除“不辣、不要花生、过敏”等限制；如果发现限制丢失，会转为澄清，不继续错误检索。
+- 菜名精确匹配优先：`retrieval/name_index.py` 先查 SQLite aliases；精确命中后用 `recipe_id` 过滤检索，避免相似菜混入。
+- 菜名不存在时 HITL：如果菜名不存在，系统不会自动替换成相似菜，而是暂停图执行，让用户确认是否选择候选。
+- 检索方式选择与融合：`retrieval/hybrid.py` 会组合 Qdrant 稠密检索、BM25 稀疏检索、本地 BM25 兜底和 rerank。
+- 证据是否足够：`nodes.judge_evidence()` 会判断命中内容是否相关、是否足够回答，并输出 `confidence` 和缺失项。
+- 烹饪状态更新：`nodes.update_cooking_state()` 会维护当前 thread 正在做哪道菜、做到第几步，并理解“下一步、重复、上一步”。
+- 回答边界控制：`nodes.answer()` 会基于证据回答；没有证据时不编造，不把相似菜当成用户指定菜。
+- 可观测性记录：`nodes.persist_trace()` 会保存每轮 raw query、rewritten query、命中项、分数、证据判断、引用和状态变化，方便回放决策过程。
+  - checkpoint = LangGraph 保存的图运行状态；
+    - HITL：checkpoint 用来暂停后继续
+    - 上下文/突然换问题：checkpoint 用来记住 thread 状态，辅助理解和状态切换
+  - trace = 我们额外记录的可观测调试信息
+    - trace 可以作为状态的一部分被带着走
+    - 但 checkpoint 的目的不是专门保存 trace
 
 ## Query 重写保护
 
