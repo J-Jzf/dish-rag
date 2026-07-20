@@ -99,7 +99,7 @@ def eval_retrieval(
 
 @app.command()
 def qdrant_preview(
-    limit: int = 5,
+    limit: int = 2,
     with_vectors: Annotated[
         bool,
         typer.Option(help="是否打印向量内容；默认不打印，因为向量通常很长。"),
