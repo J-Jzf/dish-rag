@@ -1,0 +1,8 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+var/
+build/
+*.pdftotext.txt
+tmp_pdf_extract.txt

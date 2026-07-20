@@ -1,0 +1,6 @@
+{"query":"宫保鸡丁怎么做？","expected_recipe_ids":["001"],"expected_fields":["steps"]}
+{"query":"麻婆豆腐有哪些过敏原？","expected_recipe_ids":["002"],"expected_fields":["allergens"]}
+{"query":"不吃辣能做宫保鸡丁吗？不要省略我的限制。","expected_recipe_ids":["001"],"expected_fields":["substitutions","ingredients"]}
+{"query":"腌笃鲜要炖多久？","expected_recipe_ids":["029"],"expected_fields":["time","steps"]}
+{"query":"下一步怎么做？","expected_intent":"cooking_navigation"}
+{"query":"教我做火星牛肉","expected_intent":"unknown_recipe_hitl"}
