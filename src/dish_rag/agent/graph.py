@@ -1,6 +1,7 @@
 """LangGraph 图组装。"""
 
 from pathlib import Path
+import sqlite3
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -13,9 +14,13 @@ def build_graph(nodes: AgentNodes, checkpoint_path: Path):
     """编译带 SQLite checkpoint 的菜谱 Agent 图。"""
 
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    checkpointer = SqliteSaver.from_conn_string(str(checkpoint_path))
+    # 当前版本的 SqliteSaver.from_conn_string() 返回上下文管理器；
+    # graph.compile() 需要真正的 BaseCheckpointSaver 实例，所以这里显式创建连接。
+    connection = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
+    checkpointer = SqliteSaver(connection)
 
     graph = StateGraph(DishAgentState)
+    # 定义图的节点顺序
     graph.add_node("start_trace", nodes.start_trace)
     graph.add_node("classify_intent", nodes.classify_intent)
     graph.add_node("rewrite_query", nodes.rewrite_query)
@@ -26,7 +31,7 @@ def build_graph(nodes: AgentNodes, checkpoint_path: Path):
     graph.add_node("update_cooking_state", nodes.update_cooking_state)
     graph.add_node("answer", nodes.answer)
     graph.add_node("persist_trace", nodes.persist_trace)
-
+    # 定义图的边
     graph.add_edge(START, "start_trace")
     graph.add_edge("start_trace", "classify_intent")
     graph.add_edge("classify_intent", "rewrite_query")

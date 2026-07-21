@@ -1,6 +1,7 @@
 """拒答规则和用户限制条件保护规则。"""
 
 from dataclasses import dataclass
+import re
 
 
 REFUSAL_KEYWORDS = (
@@ -30,7 +31,7 @@ CONSTRAINT_KEYWORDS = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True) # 创建一个不可修改的数据类
 class SafetyDecision:
     """拒答检查器返回的小型结果对象。"""
 
@@ -52,18 +53,37 @@ def check_refusal(query: str) -> SafetyDecision:
 
 
 def extract_user_constraints(query: str) -> list[str]:
-    """抽取 Query 重写时必须保留的显式饮食限制。"""
+    """抽取 Query 重写时必须保留的显式饮食限制。输出用户原始query，输出限制条件list。"""
 
     constraints: list[str] = []
-    clauses = query.replace("，", "。").replace(",", "。").split("。")
+    # 先用常见标点、空白、换行切分；用户不打中文标点但用空格分隔时也能识别。
+    clauses = re.split(r"[。，,；;、\s]+", query)
     for clause in clauses:
-        if any(keyword in clause for keyword in CONSTRAINT_KEYWORDS):
-            constraints.append(clause.strip())
-    return [constraint for constraint in constraints if constraint]
+        normalized_clause = clause.strip()
+        if any(keyword in normalized_clause for keyword in CONSTRAINT_KEYWORDS):
+            constraints.append(normalized_clause)
+
+    # 再处理完全不打分隔符的情况，例如“宫保鸡丁不要花生不辣”。
+    # 这里从每个限制关键词开始，截取到下一个限制关键词或句尾。
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in CONSTRAINT_KEYWORDS)
+    matches = list(re.finditer(keyword_pattern, query))
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(query)
+        fragment = query[start:end].strip(" ，,。；;、\t\r\n")
+        if fragment:
+            constraints.append(fragment)
+
+    # 去重并保留原始顺序，返回非空限制条件。
+    unique_constraints: list[str] = []
+    for constraint in constraints:
+        if constraint and constraint not in unique_constraints:
+            unique_constraints.append(constraint)
+    return unique_constraints
 
 
 def detect_constraint_loss(original_constraints: list[str], rewritten_query: str) -> list[str]:
-    """找出在重写 Query 中消失的限制条件。"""
+    """找出在重写 Query 中消失的限制条件（用户query有但重写后无或被弱化了的）。"""
 
     missing: list[str] = []
     for constraint in original_constraints:

@@ -87,51 +87,53 @@ class QdrantRecipeIndex:
 
     def hybrid_search(
         self,
-        dense_vector: list[float],
-        sparse_vector: object,
-        limit: int,
-        filters: dict[str, object] | None = None,
+        dense_vector: list[float], # 用户 query 的稠密向量
+        sparse_vector: object, # 用户 query 的 BM25 稀疏向量
+        limit: int, # 最终返回多少条结果
+        filters: dict[str, object] | None = None, # 过滤条件，如{"recipe_id": "001"}表示只搜宫保鸡丁这道菜的 chunk
     ) -> list[RetrievalHit]:
         """用稠密和稀疏预检索，再通过倒数排名融合搜索 Qdrant。"""
+        # 在 Qdrant 里做 dense + sparse 混合检索
 
         from qdrant_client import models
 
-        qdrant_filter = _build_filter(filters or {})
-        response = self.client.query_points(
-            collection_name=self.collection,
-            prefetch=[
+        qdrant_filter = _build_filter(filters or {}) # 把普通 Python 字典过滤条件转换成 Qdrant 能理解的 filter
+        response = self.client.query_points( # 调用 Qdrant-client 查询（库函数）
+            collection_name=self.collection, # 指定查哪个 collection（个人感觉通俗意义上sql的表）
+            prefetch=[ # 两路预检索，prefetch（库函数）
                 models.Prefetch(
                     query=dense_vector,
-                    using="dense",
+                    using="dense", # 找语义相似的 chunk
                     filter=qdrant_filter,
-                    limit=limit * 3,
+                    limit=limit * 3, # 融合前候选更多，不容易漏
                 ),
                 models.Prefetch(
                     query=_to_sparse_vector(sparse_vector),
-                    using="bm25",
+                    using="bm25", # 找关键词/词项匹配的 chunk
                     filter=qdrant_filter,
-                    limit=limit * 3,
+                    limit=limit * 3, # 融合前候选更多，不容易漏
                 ),
             ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
-            limit=limit,
-            with_payload=True,
+            query=models.FusionQuery(fusion=models.Fusion.RRF), # 用 RRF 融合两路结果
+            limit=limit, # 融合后最终返回 limit 条
+            with_payload=True, # 让 Qdrant 返回 payload
         )
-        points = getattr(response, "points", response)
-        hits: list[RetrievalHit] = []
+        points = getattr(response, "points", response) # 如果 response 有 points 属性，就用 response.points；否则就直接用 response。
+        hits: list[RetrievalHit] = [] # 准备保存统一格式的检索结果
         for point in points:
-            payload = point.payload or {}
+            payload = point.payload or {} # 如果 payload 是空，就用 {} 防止报错。
             hits.append(
-                RetrievalHit(
-                    chunk_id=payload.get("chunk_id", ""),
-                    recipe_id=payload.get("recipe_id", ""),
-                    recipe_name=payload.get("recipe_name", ""),
-                    field=payload.get("field", ""),
-                    text=payload.get("text", ""),
-                    page=int(payload.get("page", 0)),
-                    score=float(point.score or 0.0),
-                    source="fusion",
-                    filters=filters or {},
+                RetrievalHit( # 把 Qdrant point 转成项目统一的 RetrievalHit
+                    chunk_id=payload.get("chunk_id", ""), # chunk 编号
+                    recipe_id=payload.get("recipe_id", ""), # 菜谱编号
+                    recipe_name=payload.get("recipe_name", ""), # 菜谱名称
+                    field=payload.get("field", ""), # 字段
+                    text=payload.get("text", ""), # chunk 原文文本内容
+                    page=int(payload.get("page", 0)), # PDF 页码
+                    step_no=_optional_int(payload.get("step_no")),
+                    score=float(point.score or 0.0), # Qdrant 融合后的分数
+                    source="fusion", # 表示这个结果来自 Qdrant dense/sparse RRF 融合
+                    filters=filters or {}, # 记录本次检索使用的过滤条件
                 )
             )
         return hits
@@ -144,6 +146,14 @@ def _stable_point_id(chunk_id: str) -> int:
 
     digest = hashlib.sha1(chunk_id.encode("utf-8")).hexdigest()
     return int(digest[:15], 16)
+
+
+def _optional_int(value: object) -> int | None:
+    """把 payload 中可能为空的步骤号转成 int。"""
+
+    if value in (None, ""):
+        return None
+    return int(value)
 
 
 def _to_sparse_vector(vector: object):

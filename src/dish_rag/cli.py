@@ -50,8 +50,8 @@ def search(query: str, limit: int = 8) -> None:
 @app.command()
 def chat(
     query: str,
-    thread_id: str = "default",
-    user_id: str = "default",
+    thread_id: str = "default", # 对话线程 ID，默认是 "default"，也可以自己起名为类似--thread-id kitchen-001，一条对话线（当前的代码实现的版本）维护一个菜品的状态
+    user_id: str = "default", # 用户 ID，默认是 "default"，主要用于长期记忆，比如用户偏好、过敏信息。
 ) -> None:
     """运行一轮 LangGraph 对话。"""
 
@@ -61,22 +61,22 @@ def chat(
     from dish_rag.observability import render_trace
 
     settings = get_settings(Path.cwd())
-    graph = make_graph(settings)
-    result = graph.invoke(
+    graph = make_graph(settings) # 编译图
+    result = graph.invoke( # 执行一轮 LangGraph
         {
             "thread_id": thread_id,
             "user_id": user_id,
             "user_query": query,
         },
-        config={"configurable": {"thread_id": thread_id}},
+        config={"configurable": {"thread_id": thread_id}}, # 这是给 LangGraph checkpoint 用的，LangGraph 会用这个 thread_id 保存/读取 checkpoint。
     )
-    if "__interrupt__" in result:
+    if "__interrupt__" in result: # 这里处理 HITL
         console.print(result["__interrupt__"])
         return
-    console.print(result.get("answer", ""))
+    console.print(result.get("answer", "")) # 这里处理 HITL
     if result.get("trace"):
-        trace = result["trace"]
-        render_trace(trace if isinstance(trace, TurnTrace) else TurnTrace.model_validate(trace))
+        trace = result["trace"] # 取出 trace。trace 是本轮执行过程记录，如识别意图、重写query、检索命中、证据判断、状态变化
+        render_trace(trace if isinstance(trace, TurnTrace) else TurnTrace.model_validate(trace)) # trace 数据模型
 
 
 @app.command()

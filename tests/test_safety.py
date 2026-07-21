@@ -14,3 +14,19 @@ def test_detect_constraint_loss_flags_missing_rewrite_terms():
     missing = detect_constraint_loss(constraints, "宫保鸡丁 做法 少辣")
 
     assert missing == ["不要花生", "不辣"]
+
+
+def test_extract_constraints_without_punctuation_or_with_spaces():
+    query = "宫保鸡丁 不要花生 不辣"
+    constraints = extract_user_constraints(query)
+
+    assert "不要花生" in constraints
+    assert "不辣" in constraints
+
+
+def test_extract_constraints_without_any_separator():
+    query = "宫保鸡丁不要花生不辣"
+    constraints = extract_user_constraints(query)
+
+    assert "不要花生" in constraints
+    assert "不辣" in constraints

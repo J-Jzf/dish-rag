@@ -33,6 +33,7 @@ class LocalBM25:
                     field=str(chunk.field),
                     text=chunk.text,
                     page=chunk.page,
+                    step_no=chunk.step_no,
                     score=float(score),
                     source="bm25",
                 )

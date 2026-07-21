@@ -108,19 +108,20 @@ class RetrievalHit(BaseModel):
     field: str
     text: str
     page: int
+    step_no: int | None = None
     score: float
     source: Literal["exact", "qdrant_dense", "qdrant_sparse", "bm25", "fusion", "rerank"]
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
-class EvidenceJudgeResult(BaseModel):
+class EvidenceJudgeResult(BaseModel): # 是一个 Pydantic 数据模型，用来保存 Evidence Judge 的输出。
     """判断证据是否足以支持回答的量化结果。"""
 
-    relevant: bool
-    sufficient: bool
-    confidence: float
-    reasons: list[str] = Field(default_factory=list)
-    missing: list[str] = Field(default_factory=list)
+    relevant: bool # 证据是否相关
+    sufficient: bool # 证据是否足够回答
+    confidence: float # 置信度，通常是 0 到 1
+    reasons: list[str] = Field(default_factory=list) # 判断理由列表。默认是空列表。
+    missing: list[str] = Field(default_factory=list) # 缺失信息列表。比如“缺少步骤”“缺少原材料”。
 
 
 class CookingState(BaseModel):
@@ -130,7 +131,7 @@ class CookingState(BaseModel):
     active_recipe_name: str | None = None
     current_step_no: int = 0
     total_steps: int = 0
-    last_action: str = ""
+    last_action: str = "" # 上一次状态动作，可能是start、next、prev、repeat、next_from_matched_step、repeat_matched_step等
 
 
 class TurnTrace(BaseModel):

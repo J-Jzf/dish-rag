@@ -26,7 +26,7 @@ class ChatClient:
 
         import json
 
-        response = self.client.chat.completions.create(
+        response = self.client.chat.completions.create( # self.client 是模型客户端，.chat.completions.create(...) 会向大模型发送 prompt，然后得到模型回复。
             model=self.model_id,
             messages=[
                 {"role": "system", "content": system},
@@ -35,7 +35,7 @@ class ChatClient:
             response_format={"type": "json_object"},
             temperature=0,
         )
-        content = response.choices[0].message.content or "{}"
+        content = response.choices[0].message.content or "{}" # 取第一个候选回答里的正文内容。
         return json.loads(content)
 
     def complete_text(self, system: str, user: str) -> str:
@@ -111,20 +111,39 @@ class RerankClient:
     def rerank(self, query: str, documents: list[str]) -> list[tuple[int, float]]:
         """返回按相关性排序的 `(文档下标, 分数)`。"""
 
-        if not self.base_url or not self.model_id or not documents:
-            return [(index, 1.0 / (index + 1)) for index in range(len(documents))]
+        if not self.base_url or not self.model_id or not documents: # 兜底：保持原顺序，只给一个递减分数。
+            return _fallback_ranking(documents)
 
-        payload = {"model": self.model_id, "query": query, "documents": documents}
+        payload = {
+            "model": self.model_id,
+            "query": query,
+            "top_n": len(documents),
+            "documents": documents,
+            "return_documents": False,
+        }
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        with httpx.Client(timeout=30) as client:
-            response = client.post(self.base_url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+        try:
+            with httpx.Client(timeout=30) as client:
+                response = client.post(self.base_url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+        except Exception:
+            # rerank 是精排增强，不是事实源。端点配置错误、404、超时或服务异常时，
+            # 保留 hybrid 原始排序继续回答，避免整轮 Agent 崩溃。
+            return _fallback_ranking(documents)
 
         results = data.get("results") or data.get("data") or []
         ranked: list[tuple[int, float]] = []
-        for result in results:
+        for result in results: # 从每个结果里取index和score，兼容不同服务商的返回格式。
             index = result.get("index", result.get("document_index", 0))
             score = result.get("relevance_score", result.get("score", 0.0))
             ranked.append((int(index), float(score)))
+        if not ranked:
+            return _fallback_ranking(documents)
         return sorted(ranked, key=lambda item: item[1], reverse=True)
+
+
+def _fallback_ranking(documents: list[str]) -> list[tuple[int, float]]:
+    """在 rerank 不可用时保留原候选顺序。"""
+
+    return [(index, 1.0 / (index + 1)) for index in range(len(documents))]

@@ -48,33 +48,34 @@ class HybridRetriever:
         limit: int = 8,
         filters: dict[str, object] | None = None,
     ) -> list[RetrievalHit]:
-        """执行混合检索，并对融合后的候选进行 rerank。"""
+        """执行混合检索，并对融合后的候选（去重后）进行 rerank。"""
 
-        qdrant_hits: list[RetrievalHit] = []
+        qdrant_hits: list[RetrievalHit] = [] # 先准备空的 Qdrant 命中列表
         try:
             dense = self.embeddings.embed_query(query)
             sparse = self.sparse_encoder.encode_query(query)
-            qdrant_hits = self.qdrant.hybrid_search(dense, sparse, limit=limit, filters=filters)
+            qdrant_hits = self.qdrant.hybrid_search(dense, sparse, limit=limit, filters=filters) # 不用显式传入 Qdrant 中 chunk 的 embedding。因为 chunk 的 embedding 已经在 ingest 阶段写进 Qdrant 了。
         except Exception:
             # 本地开发时 Qdrant 可能暂时不可用；BM25 兜底能保证 CLI 探索和测试仍可用。
             qdrant_hits = []
 
-        bm25_hits = self.local_bm25.search(query, limit=limit)
-        merged = _dedupe_hits(qdrant_hits + bm25_hits)
+        bm25_hits = self.local_bm25.search(query, limit=limit) # 为了不让整个程序崩溃，后面继续用本地 BM25 兜底。这个 BM25 是基于 SQLite chunks 建的，不依赖 Qdrant。
+        merged = _dedupe_hits(qdrant_hits + bm25_hits) # 把 Qdrant 结果和本地 BM25 结果合并，然后去重。
         if not merged:
             return []
 
-        documents = [hit.text for hit in merged]
-        reranked = self.reranker.rerank(query, documents)
+        documents = [hit.text for hit in merged] # 取出去重后的候选 chunk 文本，供 rerank 使用。
+        reranked = self.reranker.rerank(query, documents) # 按openai调用 rerank 模型，输入（query+候选chunk文本列表），输出（候选chunk文本的索引+分数）列表
+        # 让一个专门的排序模型重新判断“query 和每个 chunk 到底有多匹配”。常见的rerank做法是cross-encoder / reranker，模型直接同时读取 query + chunk，输出一个相关性分数。
         final_hits: list[RetrievalHit] = []
-        for doc_index, score in reranked[:limit]:
+        for doc_index, score in reranked[:limit]: # 只取 rerank 后前 limit 条
             hit = merged[doc_index]
-            final_hits.append(hit.model_copy(update={"score": score, "source": "rerank"}))
+            final_hits.append(hit.model_copy(update={"score": score, "source": "rerank"})) # 更新score，改成改成 rerank 分数。
         return final_hits
 
 
 def _dedupe_hits(hits: list[RetrievalHit]) -> list[RetrievalHit]:
-    """对相同 chunk id 只保留最高分命中。"""
+    """对相同 chunk id 只保留最高分命中。负责去重。"""
 
     by_id: dict[str, RetrievalHit] = {}
     for hit in hits:

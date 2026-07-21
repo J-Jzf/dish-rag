@@ -43,6 +43,8 @@ def render_trace(trace: TurnTrace) -> None:
     table.add_row("Rewritten Query", trace.rewritten_query)
     table.add_row("State Before", json.dumps(trace.state_before, ensure_ascii=False))
     table.add_row("State After", json.dumps(trace.state_after, ensure_ascii=False))
+    if trace.notes:
+        table.add_row("Notes", "\n".join(trace.notes))
 
     if trace.evidence_judge:
         table.add_row("Evidence Judge", trace.evidence_judge.model_dump_json())
@@ -55,6 +57,7 @@ def render_trace(trace: TurnTrace) -> None:
             "chunk_id": hit.chunk_id,
             "recipe": f"{hit.recipe_id} {hit.recipe_name}",
             "field": hit.field,
+            "step_no": hit.step_no,
             "score": hit.score,
             "source": hit.source,
             "filters": hit.filters,
