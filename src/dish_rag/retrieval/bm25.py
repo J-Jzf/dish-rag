@@ -15,16 +15,23 @@ class LocalBM25:
         self.tokenized = [_tokenize(chunk.text) for chunk in chunks]
         self.index = BM25Okapi(self.tokenized) if chunks else None
 
-    def search(self, query: str, limit: int = 10) -> list[RetrievalHit]:
-        """用 BM25 搜索本地 chunk。"""
+    def search(
+        self,
+        query: str,
+        limit: int = 10,
+        filters: dict[str, object] | None = None,
+    ) -> list[RetrievalHit]:
+        """用 BM25 搜索本地 chunk，并复用上层传入的过滤条件。"""
 
         if not self.index:
             return []
         scores = self.index.get_scores(_tokenize(query))
-        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)[:limit]
+        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
         hits: list[RetrievalHit] = []
         for index, score in ranked:
             chunk = self.chunks[index]
+            if not _matches_filters(chunk, filters or {}):
+                continue
             hits.append(
                 RetrievalHit(
                     chunk_id=chunk.chunk_id,
@@ -36,8 +43,11 @@ class LocalBM25:
                     step_no=chunk.step_no,
                     score=float(score),
                     source="bm25",
+                    filters=filters or {},
                 )
             )
+            if len(hits) >= limit:
+                break
         return hits
 
 
@@ -50,3 +60,22 @@ def _tokenize(text: str) -> list[str]:
     # 对这个小型中文菜谱库来说，字符 bigram 足够可用，也能减少演示依赖。
     # 生产系统可以换成 jieba 或领域分词器，不需要改变检索器 API。
     return [compact[index : index + 2] for index in range(len(compact) - 1)]
+
+
+def _matches_filters(chunk: RecipeChunk, filters: dict[str, object]) -> bool:
+    """判断本地 chunk 是否满足和 Qdrant payload filter 等价的条件。"""
+
+    for key, expected in filters.items():
+        if key == "recipe_id":
+            actual = chunk.recipe_id
+        elif key == "recipe_name":
+            actual = chunk.recipe_name
+        elif key == "field":
+            actual = str(chunk.field)
+        elif key == "step_no":
+            actual = chunk.step_no
+        else:
+            actual = chunk.metadata.get(key)
+        if actual != expected:
+            return False
+    return True

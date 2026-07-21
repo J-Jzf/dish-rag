@@ -59,7 +59,7 @@ class HybridRetriever:
             # 本地开发时 Qdrant 可能暂时不可用；BM25 兜底能保证 CLI 探索和测试仍可用。
             qdrant_hits = []
 
-        bm25_hits = self.local_bm25.search(query, limit=limit) # 为了不让整个程序崩溃，后面继续用本地 BM25 兜底。这个 BM25 是基于 SQLite chunks 建的，不依赖 Qdrant。
+        bm25_hits = self.local_bm25.search(query, limit=limit, filters=filters) # 为了不让整个程序崩溃，后面继续用本地 BM25 兜底；有菜名过滤时，本地 BM25 也必须限制在同一道菜内。
         merged = _dedupe_hits(qdrant_hits + bm25_hits) # 把 Qdrant 结果和本地 BM25 结果合并，然后去重。
         if not merged:
             return []

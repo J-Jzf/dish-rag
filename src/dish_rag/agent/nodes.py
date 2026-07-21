@@ -81,6 +81,7 @@ class AgentNodes:
             state["trace"],
             parsed_intent=_intent_value(rewrite.intent),
             completed_query=rewrite.completed_query,
+            recipe_entities=rewrite.recipe_entities,
         )
         return {**state, "query_rewrite": rewrite, "trace": trace}
 
@@ -401,7 +402,9 @@ def _apply_cooking_navigation(
                 next_state.last_action = "repeat_matched_step"
             else:
                 next_state.current_step_no = min(next_state.total_steps, step_hit.step_no + 1)
-                next_state.last_action = "next_from_matched_step"
+                next_state.last_action = (
+                    "completed" if step_hit.step_no >= next_state.total_steps else "next_from_matched_step"
+                )
             return (
                 next_state,
                 f"烹饪导航：hybrid 命中步骤 {step_hit.step_no}，同步当前步骤为 {next_state.current_step_no}。",
@@ -417,7 +420,7 @@ def _apply_cooking_navigation(
         next_state.last_action = "repeat"
     else:
         next_state.current_step_no = min(next_state.total_steps, next_state.current_step_no + 1)
-        next_state.last_action = "next"
+        next_state.last_action = "completed" if cooking_state.current_step_no >= next_state.total_steps else "next"
     return next_state, f"烹饪导航：基于 checkpoint 推进到步骤 {next_state.current_step_no}。"
 
 
@@ -439,6 +442,9 @@ def _build_cooking_navigation_answer(
     recipe = store.get_recipe(cooking_state.active_recipe_id)
     if not recipe:
         return None
+
+    if cooking_state.last_action == "completed":
+        return "已完成", []
 
     step_no = cooking_state.current_step_no
     if step_no < 1:

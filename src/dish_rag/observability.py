@@ -41,6 +41,7 @@ def render_trace(trace: TurnTrace) -> None:
     table.add_row("Intent", trace.parsed_intent)
     table.add_row("Completed Query", trace.completed_query)
     table.add_row("Rewritten Query", trace.rewritten_query)
+    table.add_row("Recipe Entities", json.dumps(trace.recipe_entities, ensure_ascii=False))
     table.add_row("State Before", json.dumps(trace.state_before, ensure_ascii=False))
     table.add_row("State After", json.dumps(trace.state_after, ensure_ascii=False))
     if trace.notes:

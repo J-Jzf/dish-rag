@@ -33,9 +33,14 @@ INTENT_USER = """用户问题：
 
 输出 JSON 字段：
 intent, completed_query, recipe_entities, needs_retrieval, preserved_constraints
+字段含义：
+- completed_query：结合当前做菜状态和长期记忆后，对用户问题做上下文补全；必须保留用户原文中的菜名、限制和关键动作。
+- recipe_entities：用户当前问题中显式提到的菜名列表；如果用户没有显式提到菜名，但当前做菜状态中有 active_recipe_name，且问题依赖“它/下一步/重复”等上下文，可以填入当前菜名。
+- needs_retrieval：是否需要检索菜谱 chunks，布尔值。
+- preserved_constraints：用户原文中必须保留的过敏、禁忌、口味限制列表。
 
 字段格式要求：
-- recipe_entities 必须是字符串数组，例如 ["宫保鸡丁"]；没有菜名时返回 []，不要返回 {{"菜名": "宫保鸡丁"}}。
+- recipe_entities 必须是字符串数组，例如 ["宫保鸡丁"]，如果用户当前问题中显式出现菜名，必须返回该菜名；没有菜名时返回 []，不要返回 {{"菜名": "宫保鸡丁"}}。
 - preserved_constraints 必须是字符串数组，例如 ["不要花生"]；没有限制时返回 []，不要返回 {{}}。
 """
 
