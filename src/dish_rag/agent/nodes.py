@@ -75,12 +75,15 @@ class AgentNodes:
                 memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
             ),
         )
+        intent = payload.get("intent", Intent.RECIPE_LOOKUP)
+        is_recommendation = _intent_value(intent) == Intent.RECOMMENDATION.value
         rewrite = QueryRewrite( # 然后把回答封装成 QueryRewrite
             raw_query=state["user_query"],
             completed_query=payload.get("completed_query") or state["user_query"],
-            intent=payload.get("intent", Intent.RECIPE_LOOKUP),
+            intent=intent,
             recipe_entities=_as_string_list(payload.get("recipe_entities", [])),
-            needs_retrieval=bool(payload.get("needs_retrieval", True)),
+            recommendation_count=_as_recommendation_count(payload.get("recommendation_count")),
+            needs_retrieval=True if is_recommendation else bool(payload.get("needs_retrieval", True)),
             preserved_constraints=_as_string_list(payload.get("preserved_constraints", [])),
         )
         trace = _update_trace(
@@ -88,6 +91,7 @@ class AgentNodes:
             parsed_intent=_intent_value(rewrite.intent),
             completed_query=rewrite.completed_query,
             recipe_entities=rewrite.recipe_entities,
+            recommendation_count=rewrite.recommendation_count if is_recommendation else 0,
         )
         return {**state, "query_rewrite": rewrite, "trace": trace}
 
@@ -106,6 +110,8 @@ class AgentNodes:
                 raw_query=rewrite.raw_query,
                 completed_query=rewrite.completed_query,
                 recipe_entities=rewrite.recipe_entities,
+                intent=_intent_value(rewrite.intent),
+                recommendation_count=rewrite.recommendation_count,
                 constraints=constraints,
             ),
         )
@@ -149,6 +155,13 @@ class AgentNodes:
                 rewrite.rewritten_query,
                 filters={"recipe_id": state["selected_recipe_id"]},
             )
+            trace = _update_trace(state["trace"], qdrant_hits=hits)
+            return {**state, "hits": hits, "trace": trace}
+
+        if _intent_value(rewrite.intent) == Intent.RECOMMENDATION.value:
+            candidate_limit = max(rewrite.recommendation_count * 4, 8)
+            candidates = self.retriever.retrieve(rewrite.rewritten_query, limit=candidate_limit)
+            hits = _distinct_recipe_hits(candidates, rewrite.recommendation_count)
             trace = _update_trace(state["trace"], qdrant_hits=hits)
             return {**state, "hits": hits, "trace": trace}
 
@@ -411,6 +424,8 @@ class AgentNodes:
             prompts.ANSWER_SYSTEM,
             prompts.ANSWER_USER.format(
                 query=rewrite.rewritten_query,
+                intent=intent,
+                recommendation_count=rewrite.recommendation_count,
                 evidence=_format_hits(state["hits"]),
                 cooking_state=state["cooking_state"].model_dump(),
                 memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
@@ -419,7 +434,8 @@ class AgentNodes:
         judge = state.get("evidence_judge")
         if judge is not None and not judge.sufficient:
             answer = f"{answer.rstrip()}\n\n证据不足"
-        citations = [_citation_from_hit(hit).model_dump() for hit in state["hits"][:4]]
+        citation_hits = state["hits"] if intent == Intent.RECOMMENDATION.value else state["hits"][:4]
+        citations = [_citation_from_hit(hit).model_dump() for hit in citation_hits]
         trace = _update_trace(state["trace"], final_citations=[Citation(**item) for item in citations])
         return {**state, "answer": answer, "citations": citations, "trace": trace}
 
@@ -600,6 +616,31 @@ def _as_string_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item not in (None, "")]
     return [str(value)]
+
+
+def _as_recommendation_count(value: object) -> int:
+    """将 LLM 返回的推荐数量规范为正整数；未提供或非法时默认 5。"""
+
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 5
+    return count if count >= 1 else 5
+
+
+def _distinct_recipe_hits(hits: list[RetrievalHit], count: int) -> list[RetrievalHit]:
+    """从 rerank 后的 chunk 命中中保留每道菜的首个命中，保证推荐菜谱不重复。"""
+
+    selected: list[RetrievalHit] = []
+    recipe_ids: set[str] = set()
+    for hit in hits:
+        if hit.recipe_id in recipe_ids:
+            continue
+        selected.append(hit)
+        recipe_ids.add(hit.recipe_id)
+        if len(selected) >= count:
+            break
+    return selected
 
 
 def _format_hits(hits: list[RetrievalHit]) -> str:

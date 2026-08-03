@@ -80,6 +80,7 @@ class Intent(str, Enum):
     FIELD_LOOKUP = "field_lookup"
     COOKING_START = "cooking_start"
     COOKING_NAVIGATION = "cooking_navigation"
+    RECOMMENDATION = "recommendation"
     PREFERENCE_UPDATE = "preference_update"
     CHITCHAT = "chitchat"
     UNSAFE_OR_REFUSAL = "unsafe_or_refusal"
@@ -96,6 +97,7 @@ class QueryRewrite(BaseModel):
     recipe_entities: list[str] = Field(default_factory=list)
     preserved_constraints: list[str] = Field(default_factory=list)
     removed_or_weakened_constraints: list[str] = Field(default_factory=list)
+    recommendation_count: int = Field(default=5, ge=1)
     needs_retrieval: bool = True
 
 
@@ -142,6 +144,7 @@ class TurnTrace(BaseModel):
     completed_query: str = ""
     rewritten_query: str = ""
     recipe_entities: list[str] = Field(default_factory=list)
+    recommendation_count: int = 0
     evidence_retry_count: int = 0
     qdrant_hits: list[RetrievalHit] = Field(default_factory=list)
     evidence_judge: EvidenceJudgeResult | None = None

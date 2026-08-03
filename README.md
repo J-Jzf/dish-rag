@@ -80,6 +80,72 @@ LANGGRAPH_CHECKPOINT_DB=var/langgraph_checkpoints.sqlite3
 
 本地 Qdrant 和在线 Qdrant 的核心作用一样：都是向量数据库，也都在这里承担“向量索引/搜索索引”的角色。本地 Qdrant 把索引文件放在本机 `var/qdrant`，适合学习、单机开发和小数据量验证；在线 Qdrant 把索引放在远程服务，适合多人共享、长期运行、权限管理、备份和更大的数据规模。无论本地还是在线，Qdrant 都不是唯一事实源，本项目的菜谱原始事实仍以 SQLite 为准。
 
+## Qdrant 的三种运行方式
+
+三种方式提供相同的 Qdrant 功能：保存 named dense vector、BM25 sparse vector 和 payload，并执行 metadata 过滤、dense/sparse 混合检索与 RRF 融合。项目统一通过 Python 的 `qdrant-client` 库访问它们，业务检索代码无需因部署方式变化而修改。
+
+### 1. 本地嵌入式模式（当前默认）
+
+Qdrant 不作为独立服务启动，而是由当前 Python 进程直接创建：
+
+```python
+QdrantClient(path="var/qdrant")
+```
+
+配置如下：
+
+```env
+QDRANT_URL=
+QDRANT_PATH=var/qdrant
+```
+
+本项目当前正使用此模式。`var/qdrant/collection/dish_recipes/storage.sqlite` 是 `qdrant-client` 本地模式维护的内部索引文件，其中保存 Qdrant collection 数据；它不同于本项目作为事实源的 `var/dish_rag.sqlite3`，不应直接按业务 SQLite 表操作。此模式不需要 Docker 或独立 Qdrant 服务，适合学习、单机开发和小规模数据验证。
+
+### 2. 本地 Docker 模式
+
+让 Qdrant 作为本机 Docker 服务运行。在项目根目录执行：
+
+```powershell
+docker run -d --name dish-rag-qdrant `
+  -p 6333:6333 -p 6334:6334 `
+  -v "${PWD}\var\qdrant-docker:/qdrant/storage" `
+  qdrant/qdrant
+```
+
+然后修改 `.env`：
+
+```env
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+QDRANT_COLLECTION=dish_recipes
+```
+
+这时项目会改用：
+
+```python
+QdrantClient(url="http://localhost:6333")
+```
+
+`QDRANT_PATH` 不再参与连接。Docker 容器内的索引数据会持久化到挂载的 `var/qdrant-docker`，并可通过 `http://localhost:6333/dashboard` 查看 Dashboard。适合本机模拟服务端、调试 Dashboard 或让多个本机进程访问同一个 Qdrant 服务。
+
+### 3. 连接独立 Qdrant 服务
+
+独立服务可以是 Qdrant Cloud，也可以是部署在其他服务器上的 Qdrant。只需配置服务地址和 API Key：
+
+```env
+QDRANT_URL=https://your-qdrant-host
+QDRANT_API_KEY=your-api-key
+QDRANT_COLLECTION=dish_recipes
+```
+
+项目同样自动使用：
+
+```python
+QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+```
+
+适合多人共享、长期运行、权限管理、备份和更大规模的数据。切换到 Docker 或独立服务后，原本 `var/qdrant` 的本地索引不会自动迁移；应在新目标上重新执行 `python main.py ingest` 建立 collection。注意该命令会重建当前配置的 `dish_recipes` collection。
+
 ## 安装与运行
 
 ```bash
@@ -544,6 +610,11 @@ python main.py search "麻婆豆腐有哪些过敏原"
   - 含义：做菜过程导航，例如下一步、再下一步、然后呢、接下来做什么、上一步、重复一下，或用户说自己做完了某个操作。
   - 例子：`调好碗汁了接下来做什么？`
   - 后续处理：分两种。纯状态导航可不走 hybrid，直接用 checkpoint 推进 `current_step_no`；如果用户描述了刚完成的具体操作，则在当前菜谱内走 `hybrid -> rerank` 定位步骤 chunk，再同步 `current_step_no` 并从 SQLite `Recipe.steps` 读取当前步骤回答。
+
+- `recommendation`
+  - 含义：根据用户的使用场景、适用人群、饮食目标、口味或限制，从菜谱库中推荐多道候选菜；不要求用户先给出具体菜名。
+  - 例子：`推荐 3 道适合健身、方便做的高蛋白菜。`、`老人少油菜有什么推荐？`
+  - 后续处理：复用 `Query 重写 -> Qdrant dense/BM25 + 本地 BM25 -> rerank -> Evidence Judge -> 回答` 链路。检索会扩大候选范围，再按 `recipe_id` 去重，保证返回的是不同菜谱而非同一道菜的多个 chunk。LLM 在意图识别阶段抽取用户指定的数量；未指定时默认推荐 5 道。当前版本不同时写入长期偏好，单纯“记住我的偏好”仍属于 `preference_update`。
 
 - `preference_update`
   - 含义：用户更新长期偏好、禁忌或过敏信息。

@@ -42,6 +42,8 @@ def render_trace(trace: TurnTrace) -> None:
     table.add_row("Completed Query", trace.completed_query)
     table.add_row("Rewritten Query", trace.rewritten_query)
     table.add_row("Recipe Entities", json.dumps(trace.recipe_entities, ensure_ascii=False))
+    if trace.recommendation_count:
+        table.add_row("Recommendation Count", str(trace.recommendation_count))
     table.add_row("Evidence Retry Count", str(trace.evidence_retry_count))
     table.add_row("State Before", json.dumps(trace.state_before, ensure_ascii=False))
     table.add_row("State After", json.dumps(trace.state_after, ensure_ascii=False))
