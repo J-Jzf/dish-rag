@@ -1,3 +1,5 @@
+import json
+
 from dish_rag.agent.nodes import AgentNodes, _distinct_recipe_hits, route_after_action
 from dish_rag.models import CookingState, Intent, IntentAction, IntentPlan, RetrievalHit, TurnTrace
 
@@ -55,6 +57,51 @@ class _MemoryStore:
 
     def save_memory(self, user_id, key, value):
         self.saved.append((user_id, key, value))
+
+
+class _IntentPromptChat:
+    def __init__(self):
+        self.user_prompt = ""
+
+    def complete_json(self, system, user):
+        self.user_prompt = user
+        return {
+            "actions": [
+                {
+                    "intent": "recommendation",
+                    "completed_query": "recommend protein meals",
+                    "needs_retrieval": True,
+                }
+            ]
+        }
+
+
+def test_intent_prompt_only_receives_preserved_constraints_from_memory():
+    chat = _IntentPromptChat()
+    nodes = AgentNodes(chat=chat, retriever=None, store=None)
+    memory = {
+        "preference_latest": json.dumps(
+            {
+                "raw_query": "sensitive original query",
+                "completed_query": "sensitive completed query",
+                "preserved_constraints": ["no peanuts", "low spice"],
+            }
+        )
+    }
+
+    nodes.classify_intent(
+        {
+            "user_query": "recommend protein meals",
+            "cooking_state": CookingState(),
+            "memory": memory,
+            "trace": TurnTrace(raw_query="recommend protein meals"),
+        }
+    )
+
+    assert "no peanuts" in chat.user_prompt
+    assert "low spice" in chat.user_prompt
+    assert "sensitive original query" not in chat.user_prompt
+    assert "sensitive completed query" not in chat.user_prompt
 
 
 def test_preference_action_updates_in_turn_memory_before_next_recommendation_action():

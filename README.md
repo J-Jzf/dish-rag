@@ -619,7 +619,7 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - `preference_update`
   - 含义：用户更新长期偏好、禁忌或过敏信息。
   - 例子：`我不吃花生，以后都少辣。`
-  - 后续处理：通常不走 hybrid；`answer()` 会把偏好/限制写入 SQLite `long_term_memory`，后续涉及食材建议、替换、过敏风险时再读出并提醒用户确认。
+  - 后续处理：通常不走 hybrid；`answer()` 会把偏好/限制写入 SQLite `long_term_memory`，后续涉及食材建议、替换、过敏风险时再读出并提醒用户确认。数据库会保留原始 Query、补全 Query 和 `preserved_constraints` 以便审计，但注入后续 LLM 提示词的只有 `preserved_constraints`，并以“用户偏好”形式提供。
 
 - `chitchat`
   - 含义：普通闲聊或不需要菜谱证据的问题。

@@ -91,7 +91,7 @@ class AgentNodes:
             prompts.INTENT_USER.format(
                 query=state["user_query"],
                 cooking_state=state["cooking_state"].model_dump(),
-                memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
+                memory=_format_preferences_for_prompt(state.get("memory", {})),
             ),
         )
         raw_actions = payload.get("actions")
@@ -194,7 +194,7 @@ class AgentNodes:
                 recipe_entities=rewrite.recipe_entities,
                 intent=_intent_value(rewrite.intent),
                 recommendation_count=rewrite.recommendation_count,
-                memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
+                memory=_format_preferences_for_prompt(state.get("memory", {})),
                 constraints=constraints,
             ),
         )
@@ -529,7 +529,7 @@ class AgentNodes:
             prompts.MULTI_ACTION_ANSWER_SYSTEM,
             prompts.MULTI_ACTION_ANSWER_USER.format(
                 action_results=_format_action_results(results),
-                memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
+                memory=_format_preferences_for_prompt(state.get("memory", {})),
             ),
         )
         evidence_warning = _format_evidence_warning(
@@ -608,7 +608,7 @@ class AgentNodes:
                 recommendation_count=rewrite.recommendation_count,
                 evidence=_format_hits(state["hits"]),
                 cooking_state=state["cooking_state"].model_dump(),
-                memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
+                memory=_format_preferences_for_prompt(state.get("memory", {})),
             ),
         )
         judge = state.get("evidence_judge")
@@ -932,6 +932,22 @@ def _dedupe_citations(citations: Any) -> list[Citation]:
         seen.add(key)
         result.append(citation)
     return result
+
+
+def _format_preferences_for_prompt(memory: dict[str, Any]) -> str:
+    """只将长期记忆中的 preserved_constraints 作为用户偏好提供给模型。"""
+
+    stored_preference = memory.get("preference_latest")
+    if isinstance(stored_preference, str):
+        try:
+            stored_preference = json.loads(stored_preference)
+        except json.JSONDecodeError:
+            return "无"
+    if not isinstance(stored_preference, dict):
+        return "无"
+
+    constraints = _as_string_list(stored_preference.get("preserved_constraints", []))
+    return "；".join(constraints) if constraints else "无"
 
 
 def _format_evidence_warning(

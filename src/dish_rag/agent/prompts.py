@@ -26,7 +26,7 @@ INTENT_USER = """用户问题：{query}
 当前做菜状态：
 {cooking_state}
 
-长期记忆：
+用户偏好（仅来自已保存的 preserved_constraints）：
 {memory}
 
 只输出以下 JSON：
@@ -55,7 +55,7 @@ REWRITE_USER = """原始 Query：{raw_query}
 识别到的菜谱实体：{recipe_entities}
 意图：{intent}
 推荐数量：{recommendation_count}
-当前长期记忆：{memory}
+用户偏好（仅来自已保存的 preserved_constraints）：{memory}
 必须保留的限制：{constraints}
 
 输出 JSON 字段：rewritten_query、preserved_constraints、removed_or_weakened_constraints。
@@ -97,7 +97,7 @@ ANSWER_USER = """用户问题：{query}
 当前做菜状态：
 {cooking_state}
 
-长期记忆：
+用户偏好（仅来自已保存的 preserved_constraints）：
 {memory}
 
 请用中文回答。引用格式示例：[PDF p.3｜001 宫保鸡丁｜步骤 2]。"""
@@ -108,7 +108,7 @@ MULTI_ACTION_ANSWER_SYSTEM = """你是严谨的菜谱助手。根据用户输入
 MULTI_ACTION_ANSWER_USER = """已执行动作及结果：
 {action_results}
 
-当前长期记忆：
+用户偏好（仅来自已保存的 preserved_constraints）：
 {memory}
 
 请合并回答所有动作。引用格式示例：[PDF p.3｜001 宫保鸡丁｜步骤 2]。"""
