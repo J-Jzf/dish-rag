@@ -532,12 +532,15 @@ class AgentNodes:
                 memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
             ),
         )
-        if any(
-            result.evidence_judge is not None and not result.evidence_judge.sufficient
-            for result in results
-            if result.hits
-        ):
-            answer = f"{answer.rstrip()}\n\n证据不足"
+        evidence_warning = _format_evidence_warning(
+            [
+                (f"动作 {result.action_index + 1}", result.evidence_judge)
+                for result in results
+                if result.hits
+            ]
+        )
+        if evidence_warning:
+            answer = f"{answer.rstrip()}\n\n{evidence_warning}"
         trace = _update_trace(state["trace"], final_citations=citations)
         return {
             **state,
@@ -609,8 +612,9 @@ class AgentNodes:
             ),
         )
         judge = state.get("evidence_judge")
-        if judge is not None and not judge.sufficient:
-            answer = f"{answer.rstrip()}\n\n证据不足"
+        evidence_warning = _format_evidence_warning([("", judge)])
+        if evidence_warning:
+            answer = f"{answer.rstrip()}\n\n{evidence_warning}"
         citation_hits = state["hits"] if intent == Intent.RECOMMENDATION.value else state["hits"][:4]
         citations = [_citation_from_hit(hit).model_dump() for hit in citation_hits]
         trace = _update_trace(state["trace"], final_citations=[Citation(**item) for item in citations])
@@ -928,6 +932,35 @@ def _dedupe_citations(citations: Any) -> list[Citation]:
         seen.add(key)
         result.append(citation)
     return result
+
+
+def _format_evidence_warning(
+    judges: list[tuple[str, EvidenceJudgeResult | None]],
+) -> str:
+    """把 Evidence Judge 的不相关、不充分或低置信结论及理由附在回答末尾。"""
+
+    lines: list[str] = []
+    for label, judge in judges:
+        if judge is None:
+            continue
+        conclusions: list[str] = []
+        if not judge.relevant:
+            conclusions.append("不相关")
+        if not judge.sufficient:
+            conclusions.append("证据不足")
+        if judge.confidence < 0.55:
+            conclusions.append(f"置信度低（{judge.confidence:.2f}）")
+        if not conclusions:
+            continue
+
+        detail = "、".join(conclusions)
+        if judge.reasons:
+            detail += f"；原因：{'；'.join(judge.reasons)}"
+        if judge.missing:
+            detail += f"；缺失信息：{'；'.join(judge.missing)}"
+        lines.append(f"{label}：{detail}" if label else detail)
+
+    return "证据判断：\n" + "\n".join(lines) if lines else ""
 
 
 def _update_trace(trace: TurnTrace, **updates: Any) -> TurnTrace:
