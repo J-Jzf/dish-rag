@@ -142,6 +142,7 @@ class TurnTrace(BaseModel):
     completed_query: str = ""
     rewritten_query: str = ""
     recipe_entities: list[str] = Field(default_factory=list)
+    evidence_retry_count: int = 0
     qdrant_hits: list[RetrievalHit] = Field(default_factory=list)
     evidence_judge: EvidenceJudgeResult | None = None
     final_citations: list[Citation] = Field(default_factory=list)

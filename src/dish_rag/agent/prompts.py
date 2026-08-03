@@ -82,6 +82,27 @@ JUDGE_USER = """问题：{query}
 relevant, sufficient, confidence, reasons, missing
 """
 
+RETRY_REWRITE_SYSTEM = """你是菜谱 RAG 的证据不足重检索 Query 重写器。
+只输出 JSON。
+请根据 Evidence Judge 指出的缺失信息，生成一个更明确、适合再次检索的 Query。
+必须保留用户的菜名、步骤动作、过敏、禁忌和口味限制，不得把不存在的菜名替换成相似菜。
+"""
+
+RETRY_REWRITE_USER = """原始 Query：{raw_query}
+上一次补全 Query：{completed_query}
+上一次重写 Query：{rewritten_query}
+必须保留的限制：{constraints}
+
+Evidence Judge 结果：
+{judge}
+
+上一次候选证据：
+{evidence}
+
+请针对缺失信息生成新的检索 Query，只输出：
+{{"rewritten_query": "..."}}
+"""
+
 ANSWER_SYSTEM = """你是严谨的菜谱助手。
 回答必须基于提供的菜谱证据，并带引用。
 如果加入模型额外建议，必须明确标注“模型补充建议”，且不得伪装成菜谱原文。

@@ -6,7 +6,7 @@ import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from dish_rag.agent.nodes import AgentNodes, route_after_retrieve
+from dish_rag.agent.nodes import AgentNodes, route_after_judge, route_after_retrieve
 from dish_rag.agent.state import DishAgentState
 
 
@@ -28,6 +28,7 @@ def build_graph(nodes: AgentNodes, checkpoint_path: Path):
     graph.add_node("hitl_recipe_choice", nodes.hitl_recipe_choice)
     graph.add_node("retrieve_selected_recipe", nodes.retrieve_selected_recipe)
     graph.add_node("judge_evidence", nodes.judge_evidence)
+    graph.add_node("retry_evidence", nodes.retry_evidence)
     graph.add_node("update_cooking_state", nodes.update_cooking_state)
     graph.add_node("answer", nodes.answer)
     graph.add_node("persist_trace", nodes.persist_trace)
@@ -46,7 +47,15 @@ def build_graph(nodes: AgentNodes, checkpoint_path: Path):
     )
     graph.add_edge("hitl_recipe_choice", "retrieve_selected_recipe")
     graph.add_edge("retrieve_selected_recipe", "judge_evidence")
-    graph.add_edge("judge_evidence", "update_cooking_state")
+    graph.add_conditional_edges(
+        "judge_evidence",
+        route_after_judge,
+        {
+            "retry_evidence": "retry_evidence",
+            "update_cooking_state": "update_cooking_state",
+        },
+    )
+    graph.add_edge("retry_evidence", "retrieve")
     graph.add_edge("update_cooking_state", "answer")
     graph.add_edge("answer", "persist_trace")
     graph.add_edge("persist_trace", END)

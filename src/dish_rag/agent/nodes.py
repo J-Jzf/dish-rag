@@ -44,7 +44,13 @@ class AgentNodes:
             raw_query=state["user_query"],
             state_before=cooking_state.model_dump(),
         )
-        return {**state, "cooking_state": cooking_state, "memory": memory, "trace": trace}
+        return {
+            **state,
+            "cooking_state": cooking_state,
+            "memory": memory,
+            "evidence_retry_count": 0,
+            "trace": trace,
+        }
     # 所有的return的意思是：返回一个新的 state，保留旧状态（**state），但覆盖相应字段。
 
     def classify_intent(self, state: DishAgentState) -> DishAgentState:
@@ -137,6 +143,14 @@ class AgentNodes:
             )
             return {**state, "hits": [], "trace": trace} 
         # 它本身不会暂停图执行。它只是让后续节点看到“没有 hits、trace 里有说明”，后续“answer()”根据状态返回输出的话术，**图的这一轮还是会继续走完**。
+
+        if state.get("evidence_retry_count", 0) > 0 and state.get("selected_recipe_id"):
+            hits = self.retriever.retrieve(
+                rewrite.rewritten_query,
+                filters={"recipe_id": state["selected_recipe_id"]},
+            )
+            trace = _update_trace(state["trace"], qdrant_hits=hits)
+            return {**state, "hits": hits, "trace": trace}
 
         # 第三步，如果 LLM 识别出了菜名
         # 精确菜名解析不做语义替换。
@@ -252,6 +266,49 @@ class AgentNodes:
         # 最后同样写入 state 和 trace
         trace = _update_trace(state["trace"], evidence_judge=judge)
         return {**state, "evidence_judge": judge, "trace": trace}
+
+    def retry_evidence(self, state: DishAgentState) -> DishAgentState:
+        """根据 Evidence Judge 的缺失项重写 Query，准备唯一一次重检索。"""
+
+        rewrite = state["query_rewrite"]
+        judge = state.get("evidence_judge")
+        retry_count = state.get("evidence_retry_count", 0) + 1
+        constraints = extract_user_constraints(rewrite.raw_query)
+        payload = self.chat.complete_json(
+            prompts.RETRY_REWRITE_SYSTEM,
+            prompts.RETRY_REWRITE_USER.format(
+                raw_query=rewrite.raw_query,
+                completed_query=rewrite.completed_query,
+                rewritten_query=rewrite.rewritten_query,
+                constraints=constraints,
+                judge=judge.model_dump_json() if judge else "{}",
+                evidence=_format_hits(state.get("hits", [])),
+            ),
+        )
+        rewritten_query = (
+            payload.get("rewritten_query")
+            or rewrite.rewritten_query
+            or rewrite.completed_query
+            or rewrite.raw_query
+        )
+        rewrite = rewrite.model_copy(update={"rewritten_query": rewritten_query})
+        trace = _update_trace(
+            state["trace"],
+            rewritten_query=rewritten_query,
+            evidence_retry_count=retry_count,
+            notes=[
+                *state["trace"].notes,
+                "Evidence Judge 触发第 1 次重检索。",
+            ],
+        )
+        return {
+            **state,
+            "query_rewrite": rewrite,
+            "evidence_retry_count": retry_count,
+            "hits": [],
+            "needs_hitl": False,
+            "trace": trace,
+        }
 
     def update_cooking_state(self, state: DishAgentState) -> DishAgentState:
         """更新当前 thread 的烹饪进度。"""
@@ -379,6 +436,24 @@ def route_after_retrieve(state: DishAgentState) -> str:
     """精确菜名失败但有候选时，路由到 HITL。"""
 
     return "hitl_recipe_choice" if state.get("needs_hitl") else "judge_evidence"
+
+
+def route_after_judge(state: DishAgentState) -> str:
+    """证据不合格时最多触发一次重写和重检索。"""
+
+    if state.get("evidence_retry_count", 0) >= 1:
+        return "update_cooking_state"
+    rewrite = state.get("query_rewrite")
+    if rewrite is None or not rewrite.needs_retrieval:
+        return "update_cooking_state"
+    judge = state.get("evidence_judge")
+    if judge and (
+        not judge.relevant
+        or not judge.sufficient
+        or judge.confidence < 0.55
+    ):
+        return "retry_evidence"
+    return "update_cooking_state"
 
 
 def _apply_cooking_navigation(

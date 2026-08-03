@@ -16,6 +16,7 @@ class DishAgentState(TypedDict, total=False):
     query_rewrite: QueryRewrite # Query 处理结果，包括了原始问题、补全问题、重写问题、意图、实体、约束等。
     hits: list[RetrievalHit] # 检索命中结果列表。由 retrieve 节点生成。
     evidence_judge: EvidenceJudgeResult
+    evidence_retry_count: int # Evidence Judge 触发的重检索次数，每轮最多 1 次。
     answer: str # 最终回答文本。由 answer 节点生成。
     citations: list[dict[str, Any]] # 最终引用信息。
     cooking_state: CookingState # 当前烹饪状态。由 checkpoint 保存，同一个 thread_id 后续会继续用。

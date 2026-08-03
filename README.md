@@ -70,6 +70,8 @@ QDRANT_URL=
 QDRANT_API_KEY=
 QDRANT_COLLECTION=dish_recipes
 QDRANT_PATH=var/qdrant
+SQLITE_PATH=var/dish_rag.sqlite3
+LANGGRAPH_CHECKPOINT_DB=var/langgraph_checkpoints.sqlite3
 ```
 
 `LLM_*` 用于意图识别、Query 重写、Evidence Judge 和最终回答。`EMBEDDING_*` 用于 dense vector。`RERANK_*` 用于 rerank。Qdrant 只是搜索索引，回答前仍会围绕 SQLite 保存的 chunk 和 recipe metadata 做引用。
@@ -592,7 +594,7 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - 本地 BM25 兜底：无论 Qdrant 是否可用，`retrieval/hybrid.py` 都会再跑 `LocalBM25`，它基于 SQLite chunks 做关键词检索。
 - Rerank 配置兜底：`RerankClient.rerank()` 如果没有配置 `RERANK_BASE_URL`、`RERANK_MODEL_ID`，或没有候选文档，会保留原候选顺序，并给递减分数。
 - 菜名不存在兜底：精确别名找不到时，不自动替换成相似菜，而是进入 HITL，让用户确认候选。
-- 证据不足兜底：`judge_evidence()` 如果证据不足，会标记 `sufficient=false`；`answer()` 仍生成回答，但会在末尾追加“证据不足”提示。
+- 证据不足兜底：`judge_evidence()` 如果 `relevant=false`、`sufficient=false` 或 `confidence<0.55`，且本轮还没有重试过，图会根据缺失项重写 Query 并重检索一次。第二次判断后不再重试；`answer()` 仍生成回答，但会在最终证据仍不足时追加“证据不足”提示。
 - 烹饪状态兜底：用户问“再下一步”但 checkpoint 没有当前菜谱状态、也没有显式菜名时，系统不全库乱搜，会先问用户正在做哪道菜。
 
 ## 烹饪状态
@@ -623,6 +625,8 @@ LangGraph checkpoint 使用下面的字段共同定位一条状态版本：
 ```
 
 `checkpoint` 字段保存序列化后的 LangGraph state 快照，可能包含 `user_query`、`query_rewrite`、`hits`、`evidence_judge`、`cooking_state`、`answer`、`citations`、`trace` 和 `memory` 等 channel。`writes` 表则保存图节点对这些 channel 的增量写入。checkpoint 不是“一行一轮对话”，而是同一个 thread 下多个连续的状态版本。
+
+其中出现乱码，是因为 checkpoint 使用 MsgPack 二进制序列化，直接用 SQLite 文本查看器打开会显示成乱码，并不代表数据损坏。要正确查看内容，应使用支持 MsgPack/LangGraph checkpoint 反序列化的程序读取，而不是把 `checkpoint` BLOB 当作普通文本打开。
 
 如果以后在外层增加 QA、冰箱 Text-to-SQL、闲聊等子图，可以继续共用同一张 checkpoint 表；是否使用不同的 `checkpoint_ns` 取决于是否希望为这些子图建立独立的状态命名空间。顶层意图本身通常直接作为 LangGraph state 字段保存，不必用 `checkpoint_ns` 表示。
 
