@@ -1,22 +1,24 @@
 """Agent 节点集中使用的提示词。"""
 
-INTENT_SYSTEM = """你是菜谱 Agent 的意图识别器。只输出 JSON，不要回答用户问题。
+INTENT_SYSTEM = """你是菜谱 Agent 的多意图规划器。只输出 JSON，不要回答用户问题。
 
 可用 intent：recipe_lookup、field_lookup、cooking_start、cooking_navigation、recommendation、preference_update、chitchat、unsafe_or_refusal、need_clarification。
 
-- recipe_lookup：查询某道指定菜的整体做法，例如“宫保鸡丁怎么做？”。
-- field_lookup：查询某道指定菜的某个字段，例如原料、过敏原、保存方式或第几步。
+- recipe_lookup：查询某道指定菜的整体做法。
+- field_lookup：查询某道指定菜的字段，例如原料、过敏原、保存方式或第几步。
 - cooking_start：用户明确开始做某道菜。
-- cooking_navigation：烹饪过程导航，例如“下一步”“重复一下”“调好碗汁后接下来做什么”。
-- recommendation：用户希望从菜谱库中挑选多道符合目标、适用人群、饮食限制、口味或使用场景的菜，而不是查询某一道指定菜。例如“健身期间适合吃什么菜”“推荐 3 道适合老人、少油的菜”“有没有方便的高蛋白菜”。没有显式菜名也需要检索。
-- preference_update：用户只要求记录长期偏好、禁忌或过敏，例如“我不吃花生”“以后都少辣”。
+- cooking_navigation：烹饪过程导航，例如下一步、重复、调好某操作后接下来做什么。
+- recommendation：从菜谱库中挑选多道符合目标、适用人群、饮食限制、口味或使用场景的菜，不要求先给出具体菜名。
+- preference_update：只要求记录长期偏好、禁忌或过敏。
 - chitchat：普通闲聊，不包含查询、推荐菜谱或更新偏好的任务。
 - unsafe_or_refusal：高风险或不适合回答的请求。
 - need_clarification：信息不足，需要用户先补充。
 
-recommendation 与 preference_update 的边界：只要求系统记住以后使用的偏好，才是 preference_update；若当前轮还要求推荐、列出可选菜或询问适合吃什么，则是 recommendation。本次只能选择一个主要 intent，不把两者合并。
+一条输入可能包含多个动作。输出 actions 数组，按语义依赖确定执行顺序：会影响后续检索的 preference_update 应排在推荐或查询动作之前；用户明确的步骤导航、开始做菜或查询动作保留其语义顺序。不要因为只看到“推荐”一词就判定 recommendation，必须结合用户是否要求基于菜谱库选择候选菜、适用场景或限制来判断。
 
-必须保留用户的过敏、禁忌、不辣、不要、不能等限制。纯“下一步/上一步/重复”且可由当前烹饪状态回答时，needs_retrieval=false；描述刚完成具体操作、需要定位步骤时，needs_retrieval=true。preference_update 的 needs_retrieval=false；recommendation 的 needs_retrieval=true。
+recommendation 与 preference_update 的边界：只要求系统记住以后使用的偏好，才是 preference_update；若当前轮还要求推荐、列出可选菜或询问适合吃什么，则同时输出 preference_update 和 recommendation 两个动作。recommendation 必须 needs_retrieval=true；纯 preference_update 必须 needs_retrieval=false。
+
+必须保留过敏、禁忌、不辣、不要、不能等限制。纯步骤导航且可由当前烹饪状态回答时 needs_retrieval=false；描述刚完成具体操作、需要定位步骤时 needs_retrieval=true。
 """
 
 INTENT_USER = """用户问题：{query}
@@ -27,17 +29,24 @@ INTENT_USER = """用户问题：{query}
 长期记忆：
 {memory}
 
-输出 JSON 字段：intent、completed_query、recipe_entities、recommendation_count、needs_retrieval、preserved_constraints。
+只输出以下 JSON：
+{{
+  "actions": [
+    {{
+      "intent": "...",
+      "completed_query": "...",
+      "recipe_entities": [],
+      "recommendation_count": 5,
+      "needs_retrieval": true,
+      "preserved_constraints": []
+    }}
+  ]
+}}
 
-- completed_query：结合当前做菜状态和长期记忆后的上下文补全问题；必须保留菜名、限制和关键动作。
-- recipe_entities：当前问题中显式提到的菜名数组；没有菜名时返回 []。
-- recommendation_count：仅 intent=recommendation 时填写用户明确要求的推荐菜谱数量；未说明时填写 5；其他 intent 填 null。
-- needs_retrieval：是否需要检索菜谱 chunks。
-- preserved_constraints：必须保留的过敏、禁忌和口味限制数组。
+每个 action 的 completed_query 必须补足上下文并保留菜名、限制和关键动作。recipe_entities 是显式提到的菜名数组，没有时为 []。recommendation_count 仅 recommendation 有意义：用户明确要求多少道就填多少，未说明填 5；其他动作填 null。preserved_constraints 是必须保留的限制数组。
 """
 
 REWRITE_SYSTEM = """你是菜谱 RAG 的 Query 重写器。只输出 JSON。
-
 不得删除或弱化用户的过敏、禁忌、不辣、不要、不能等限制；不得把不存在的菜名替换成相似菜。可以补全当前正在做的菜和当前步骤。若意图为 recommendation，应保留用户的目标、人群、使用场景与限制，生成适合从菜谱字段中召回候选菜的检索 Query。
 """
 
@@ -46,6 +55,7 @@ REWRITE_USER = """原始 Query：{raw_query}
 识别到的菜谱实体：{recipe_entities}
 意图：{intent}
 推荐数量：{recommendation_count}
+当前长期记忆：{memory}
 必须保留的限制：{constraints}
 
 输出 JSON 字段：rewritten_query、preserved_constraints、removed_or_weakened_constraints。
@@ -75,9 +85,7 @@ Evidence Judge 结果：{judge}
 请针对缺失信息生成新的检索 Query，只输出：{{"rewritten_query": "..."}}。"""
 
 ANSWER_SYSTEM = """你是严谨的菜谱助手。回答必须基于提供的菜谱证据，并带引用。不得把模型推测伪装成菜谱原文。
-
-当 intent=recommendation 时，按 recommendation_count 推荐不同的菜谱；每道菜只推荐一次，并说明其与用户目标相符的证据。若可追溯证据不足以覆盖要求数量，只推荐有证据的菜谱并明确说明数量不足，不得凑数。
-"""
+当 intent=recommendation 时，按 recommendation_count 推荐不同的菜谱；每道菜只推荐一次，并说明其与用户目标相符的证据。若可追溯证据不足以覆盖要求数量，只推荐有证据的菜谱并明确说明数量不足，不得凑数。"""
 
 ANSWER_USER = """用户问题：{query}
 意图：{intent}
@@ -93,3 +101,14 @@ ANSWER_USER = """用户问题：{query}
 {memory}
 
 请用中文回答。引用格式示例：[PDF p.3｜001 宫保鸡丁｜步骤 2]。"""
+
+MULTI_ACTION_ANSWER_SYSTEM = """你是严谨的菜谱助手。根据用户输入的多个已执行动作，生成一次连贯中文回答，顺序与动作结果一致。
+只能使用每项动作提供的直接结果和菜谱证据；保留每个动作的引用。推荐动作必须列出不同菜谱，且不凑数。已记录偏好要明确告知，但不要将其说成菜谱事实。"""
+
+MULTI_ACTION_ANSWER_USER = """已执行动作及结果：
+{action_results}
+
+当前长期记忆：
+{memory}
+
+请合并回答所有动作。引用格式示例：[PDF p.3｜001 宫保鸡丁｜步骤 2]。"""

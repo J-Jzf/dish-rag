@@ -2,7 +2,15 @@
 
 from typing import Any, TypedDict
 
-from dish_rag.models import CookingState, EvidenceJudgeResult, QueryRewrite, RetrievalHit, TurnTrace
+from dish_rag.models import (
+    ActionResult,
+    CookingState,
+    EvidenceJudgeResult,
+    IntentPlan,
+    QueryRewrite,
+    RetrievalHit,
+    TurnTrace,
+)
 
 # 一轮对话在图里流动时携带的“共享数据包”
 class DishAgentState(TypedDict, total=False): 
@@ -14,6 +22,9 @@ class DishAgentState(TypedDict, total=False):
     user_id: str
     user_query: str
     query_rewrite: QueryRewrite # Query 处理结果，包括了原始问题、补全问题、重写问题、意图、实体、约束等。
+    intent_plan: IntentPlan # 当前轮由 LLM 识别出的有序多意图动作计划。
+    current_action_index: int # 当前正在执行的动作下标。
+    action_results: list[ActionResult] # 已执行动作的独立结果，供最终合并回答。
     hits: list[RetrievalHit] # 检索命中结果列表。由 retrieve 节点生成。
     evidence_judge: EvidenceJudgeResult
     evidence_retry_count: int # Evidence Judge 触发的重检索次数，每轮最多 1 次。

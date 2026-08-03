@@ -11,10 +11,13 @@ from dish_rag.agent import prompts
 from dish_rag.agent.state import DishAgentState
 from dish_rag.llm.opai import ChatClient
 from dish_rag.models import (
+    ActionResult,
     Citation,
     CookingState,
     EvidenceJudgeResult,
     Intent,
+    IntentAction,
+    IntentPlan,
     QueryRewrite,
     RetrievalHit,
     TurnTrace,
@@ -63,8 +66,24 @@ class AgentNodes:
                 intent=Intent.UNSAFE_OR_REFUSAL,
                 needs_retrieval=False,
             )
+            plan = IntentPlan(
+                actions=[
+                    IntentAction(
+                        intent=Intent.UNSAFE_OR_REFUSAL,
+                        completed_query=state["user_query"],
+                        needs_retrieval=False,
+                    )
+                ]
+            )
             trace = _update_trace(state["trace"], parsed_intent=_intent_value(rewrite.intent), notes=[safety.reason])
-            return {**state, "query_rewrite": rewrite, "trace": trace}
+            return {
+                **state,
+                "query_rewrite": rewrite,
+                "intent_plan": plan,
+                "current_action_index": 0,
+                "action_results": [],
+                "trace": trace,
+            }
 
         # 如果安全，就调用 LLM
         payload = self.chat.complete_json(
@@ -75,17 +94,21 @@ class AgentNodes:
                 memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
             ),
         )
-        intent = payload.get("intent", Intent.RECIPE_LOOKUP)
-        is_recommendation = _intent_value(intent) == Intent.RECOMMENDATION.value
-        rewrite = QueryRewrite( # 然后把回答封装成 QueryRewrite
-            raw_query=state["user_query"],
-            completed_query=payload.get("completed_query") or state["user_query"],
-            intent=intent,
-            recipe_entities=_as_string_list(payload.get("recipe_entities", [])),
-            recommendation_count=_as_recommendation_count(payload.get("recommendation_count")),
-            needs_retrieval=True if is_recommendation else bool(payload.get("needs_retrieval", True)),
-            preserved_constraints=_as_string_list(payload.get("preserved_constraints", [])),
-        )
+        raw_actions = payload.get("actions")
+        if not isinstance(raw_actions, list):
+            raw_actions = [payload]
+        actions = [_intent_action_from_payload(item, state["user_query"]) for item in raw_actions if isinstance(item, dict)]
+        if not actions:
+            actions = [
+                IntentAction(
+                    intent=Intent.NEED_CLARIFICATION,
+                    completed_query=state["user_query"],
+                    needs_retrieval=False,
+                )
+            ]
+        plan = IntentPlan(actions=actions)
+        rewrite = _query_rewrite_from_action(state["user_query"], plan.actions[0])
+        is_recommendation = _intent_value(rewrite.intent) == Intent.RECOMMENDATION.value
         trace = _update_trace(
             state["trace"],
             parsed_intent=_intent_value(rewrite.intent),
@@ -93,7 +116,66 @@ class AgentNodes:
             recipe_entities=rewrite.recipe_entities,
             recommendation_count=rewrite.recommendation_count if is_recommendation else 0,
         )
-        return {**state, "query_rewrite": rewrite, "trace": trace}
+        return {
+            **state,
+            "query_rewrite": rewrite,
+            "intent_plan": plan,
+            "current_action_index": 0,
+            "action_results": [],
+            "trace": trace,
+        }
+
+    def prepare_action(self, state: DishAgentState) -> DishAgentState:
+        """装载当前动作，并在需要时先执行会影响后续动作的副作用。"""
+
+        plan = state.get("intent_plan") or IntentPlan()
+        action_index = state.get("current_action_index", 0)
+        if action_index >= len(plan.actions):
+            return state
+
+        action = plan.actions[action_index]
+        rewrite = _query_rewrite_from_action(state["user_query"], action)
+        memory = dict(state.get("memory", {}))
+        trace = _update_trace(
+            state["trace"],
+            parsed_intent=_intent_value(rewrite.intent),
+            completed_query=rewrite.completed_query,
+            recipe_entities=rewrite.recipe_entities,
+            recommendation_count=(
+                rewrite.recommendation_count
+                if _intent_value(rewrite.intent) == Intent.RECOMMENDATION.value
+                else 0
+            ),
+        )
+
+        if _intent_value(rewrite.intent) == Intent.PREFERENCE_UPDATE.value:
+            memory_value = json.dumps(
+                {
+                    "raw_query": rewrite.raw_query,
+                    "completed_query": rewrite.completed_query,
+                    "preserved_constraints": rewrite.preserved_constraints,
+                },
+                ensure_ascii=False,
+            )
+            self.store.save_memory(state.get("user_id", "default"), "preference_latest", memory_value)
+            memory["preference_latest"] = memory_value
+            trace = _update_trace(
+                trace,
+                notes=[*trace.notes, "已在当前动作中写入 SQLite long_term_memory。"],
+            )
+
+        return {
+            **state,
+            "query_rewrite": rewrite,
+            "memory": memory,
+            "hits": [],
+            "evidence_judge": None,
+            "evidence_retry_count": 0,
+            "needs_hitl": False,
+            "hitl_candidates": [],
+            "selected_recipe_id": None,
+            "trace": trace,
+        }
 
     def rewrite_query(self, state: DishAgentState) -> DishAgentState:
         """在保留用户限制条件的前提下重写 Query。"""
@@ -112,6 +194,7 @@ class AgentNodes:
                 recipe_entities=rewrite.recipe_entities,
                 intent=_intent_value(rewrite.intent),
                 recommendation_count=rewrite.recommendation_count,
+                memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
                 constraints=constraints,
             ),
         )
@@ -323,6 +406,56 @@ class AgentNodes:
             "trace": trace,
         }
 
+    def capture_action_result(self, state: DishAgentState) -> DishAgentState:
+        """在下一项动作开始前，保存当前动作的独立结果。"""
+
+        rewrite = state["query_rewrite"]
+        intent = _intent_value(rewrite.intent)
+        answer_hint = ""
+        citations: list[Citation] = []
+
+        if intent == Intent.PREFERENCE_UPDATE.value:
+            answer_hint = "我记下了这项偏好，后续推荐或食材建议会将它作为限制参考。"
+        elif intent == Intent.UNSAFE_OR_REFUSAL.value:
+            answer_hint = "这个请求涉及高风险或医疗化内容，我不能按这个方向提供做法。"
+        elif intent == Intent.NEED_CLARIFICATION.value:
+            answer_hint = "我需要先确认缺失的信息或必须保留的限制，请你补充说明。"
+        elif intent == Intent.COOKING_NAVIGATION.value:
+            navigation_answer = _build_cooking_navigation_answer(state, self.store)
+            if navigation_answer:
+                answer_hint, raw_citations = navigation_answer
+                citations = [Citation(**item) for item in raw_citations]
+
+        if not citations:
+            citation_hits = (
+                state.get("hits", [])
+                if intent == Intent.RECOMMENDATION.value
+                else state.get("hits", [])[:4]
+            )
+            citations = [_citation_from_hit(hit) for hit in citation_hits]
+
+        result = ActionResult(
+            action_index=state.get("current_action_index", 0),
+            intent=rewrite.intent,
+            query=rewrite.rewritten_query or rewrite.completed_query,
+            recommendation_count=(
+                rewrite.recommendation_count if intent == Intent.RECOMMENDATION.value else 0
+            ),
+            hits=state.get("hits", []),
+            evidence_judge=state.get("evidence_judge"),
+            evidence_retry_count=state.get("evidence_retry_count", 0),
+            answer_hint=answer_hint,
+            citations=citations,
+        )
+        action_results = [*state.get("action_results", []), result]
+        trace = _update_trace(state["trace"], action_results=action_results)
+        return {
+            **state,
+            "action_results": action_results,
+            "current_action_index": state.get("current_action_index", 0) + 1,
+            "trace": trace,
+        }
+
     def update_cooking_state(self, state: DishAgentState) -> DishAgentState:
         """更新当前 thread 的烹饪进度。"""
 
@@ -372,8 +505,52 @@ class AgentNodes:
         trace = _update_trace(state["trace"], state_after=cooking_state.model_dump(), notes=notes)
         return {**state, "cooking_state": cooking_state, "trace": trace}
 
+    def answer_actions(self, state: DishAgentState) -> DishAgentState:
+        """将多个已完成动作合并为一次最终回答。"""
+
+        results = state.get("action_results", [])
+        citations = _dedupe_citations(
+            citation for result in results for citation in result.citations
+        )
+        has_evidence = any(result.hits for result in results)
+        if not has_evidence:
+            answer = "\n\n".join(result.answer_hint for result in results if result.answer_hint)
+            if not answer:
+                answer = "菜谱库里没有找到可追溯证据。"
+            trace = _update_trace(state["trace"], final_citations=citations)
+            return {
+                **state,
+                "answer": answer,
+                "citations": [citation.model_dump() for citation in citations],
+                "trace": trace,
+            }
+
+        answer = self.chat.complete_text(
+            prompts.MULTI_ACTION_ANSWER_SYSTEM,
+            prompts.MULTI_ACTION_ANSWER_USER.format(
+                action_results=_format_action_results(results),
+                memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
+            ),
+        )
+        if any(
+            result.evidence_judge is not None and not result.evidence_judge.sufficient
+            for result in results
+            if result.hits
+        ):
+            answer = f"{answer.rstrip()}\n\n证据不足"
+        trace = _update_trace(state["trace"], final_citations=citations)
+        return {
+            **state,
+            "answer": answer,
+            "citations": [citation.model_dump() for citation in citations],
+            "trace": trace,
+        }
+
     def answer(self, state: DishAgentState) -> DishAgentState:
         """生成最终可溯源回答。"""
+
+        if state.get("action_results"):
+            return self.answer_actions(state)
 
         rewrite = state["query_rewrite"]
         intent = _intent_value(rewrite.intent)
@@ -446,6 +623,19 @@ class AgentNodes:
         if trace:
             self.store.append_trace(state.get("thread_id", "default"), trace.model_dump(mode="json"))
         return state
+
+
+def route_after_action(state: DishAgentState) -> str:
+    """继续执行下一项动作，或在澄清/拒答后终止本轮后续动作。"""
+
+    results = state.get("action_results", [])
+    if results and _intent_value(results[-1].intent) in {
+        Intent.UNSAFE_OR_REFUSAL.value,
+        Intent.NEED_CLARIFICATION.value,
+    }:
+        return "answer"
+    plan = state.get("intent_plan") or IntentPlan()
+    return "prepare_action" if state.get("current_action_index", 0) < len(plan.actions) else "answer"
 
 
 def route_after_retrieve(state: DishAgentState) -> str:
@@ -600,6 +790,44 @@ def _asks_repeat(query: str) -> bool:
     return "重复" in query or "再说" in query or "重新说" in query
 
 
+def _intent_action_from_payload(payload: dict[str, Any], raw_query: str) -> IntentAction:
+    """将 LLM 的单项动作 JSON 规范为可执行动作。"""
+
+    intent = payload.get("intent", Intent.NEED_CLARIFICATION)
+    action = IntentAction(
+        intent=intent,
+        completed_query=payload.get("completed_query") or raw_query,
+        recipe_entities=_as_string_list(payload.get("recipe_entities", [])),
+        recommendation_count=_as_recommendation_count(payload.get("recommendation_count")),
+        needs_retrieval=bool(payload.get("needs_retrieval", True)),
+        preserved_constraints=_as_string_list(payload.get("preserved_constraints", [])),
+    )
+    if _intent_value(action.intent) == Intent.RECOMMENDATION.value:
+        return action.model_copy(update={"needs_retrieval": True})
+    if _intent_value(action.intent) in {
+        Intent.PREFERENCE_UPDATE.value,
+        Intent.CHITCHAT.value,
+        Intent.UNSAFE_OR_REFUSAL.value,
+        Intent.NEED_CLARIFICATION.value,
+    }:
+        return action.model_copy(update={"needs_retrieval": False})
+    return action
+
+
+def _query_rewrite_from_action(raw_query: str, action: IntentAction) -> QueryRewrite:
+    """把当前动作转换为现有检索节点继续使用的 QueryRewrite。"""
+
+    return QueryRewrite(
+        raw_query=raw_query,
+        completed_query=action.completed_query or raw_query,
+        intent=action.intent,
+        recipe_entities=action.recipe_entities,
+        recommendation_count=action.recommendation_count,
+        needs_retrieval=action.needs_retrieval,
+        preserved_constraints=action.preserved_constraints,
+    )
+
+
 def _intent_value(intent: Intent | str) -> str:
     """统一取得 intent 的字符串值，兼容 Enum 和普通字符串。"""
 
@@ -665,6 +893,41 @@ def _citation_from_hit(hit: RetrievalHit) -> Citation:
         step_no=hit.step_no,
         chunk_id=hit.chunk_id,
     )
+
+
+def _format_action_results(results: list[ActionResult]) -> str:
+    """将顺序动作、直接答复提示和证据统一提供给最终回答模型。"""
+
+    sections: list[str] = []
+    for result in results:
+        sections.append(
+            "\n".join(
+                [
+                    f"动作 {result.action_index + 1}：{_intent_value(result.intent)}",
+                    f"问题：{result.query}",
+                    f"推荐数量：{result.recommendation_count or '无'}",
+                    f"重检索次数：{result.evidence_retry_count}",
+                    f"直接结果：{result.answer_hint or '无'}",
+                    "证据：",
+                    _format_hits(result.hits) or "无",
+                ]
+            )
+        )
+    return "\n\n".join(sections)
+
+
+def _dedupe_citations(citations: Any) -> list[Citation]:
+    """按 chunk 与步骤去重，保留动作原有的引用顺序。"""
+
+    result: list[Citation] = []
+    seen: set[tuple[str | None, str, int | None]] = set()
+    for citation in citations:
+        key = (citation.chunk_id, citation.recipe_id, citation.step_no)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(citation)
+    return result
 
 
 def _update_trace(trace: TurnTrace, **updates: Any) -> TurnTrace:

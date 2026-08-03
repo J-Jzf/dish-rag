@@ -739,6 +739,20 @@ kitchen-002：麻婆豆腐，当前第 1 步
 
 如果既没有当前菜谱状态，也没有显式菜名，系统不会全库检索后随便选一道菜，而是先问用户正在做哪道菜。
 
+## 多意图顺序执行
+
+一条用户输入不再限制为一个 intent。`classify_intent()` 会让 LLM 输出一个经 Pydantic 校验的 `IntentPlan.actions` 列表，每个动作包含 intent、补全 Query、菜名实体、推荐数量、是否检索和必须保留的限制。LLM 按语义依赖安排动作顺序：会影响后续检索的 `preference_update` 会先执行，随后动作可以使用本轮刚保存的偏好。
+
+```text
+用户：我健身、不吃花生，推荐 3 道高蛋白菜；另外宫保鸡丁下一步是什么？
+-> preference_update：写入 SQLite long_term_memory，并同步本轮 memory
+-> recommendation：携带更新后的 memory，走 rewrite -> hybrid -> rerank -> Evidence Judge
+-> cooking_navigation：从 checkpoint 读取宫保鸡丁状态并推进步骤
+-> answer：合并上述三个动作为一次回答，并保留各自引用
+```
+
+每项动作执行完成后都会写入 `action_results`，再执行下一项，因此后续动作不会覆盖前面动作的 hits、Evidence Judge 或引用。需要检索的动作各自最多重检索一次；`recommendation` 不更新 `CookingState`，而 `cooking_start`、`recipe_lookup`、步骤型 `field_lookup` 和 `cooking_navigation` 仍按原有规则更新做菜状态。若某项动作进入 HITL，LangGraph checkpoint 会保存当前动作下标，用户确认后从该动作继续，完成后再执行后续动作。
+
 ## 溯源与回答
 
 回答必须引用 PDF 页码、菜谱编号、字段或步骤，格式类似：

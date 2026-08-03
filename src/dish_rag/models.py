@@ -101,6 +101,23 @@ class QueryRewrite(BaseModel):
     needs_retrieval: bool = True
 
 
+class IntentAction(BaseModel):
+    """LLM 为单轮用户输入规划的一项可顺序执行动作。"""
+
+    intent: Intent | str
+    completed_query: str = ""
+    recipe_entities: list[str] = Field(default_factory=list)
+    recommendation_count: int = Field(default=5, ge=1)
+    needs_retrieval: bool = True
+    preserved_constraints: list[str] = Field(default_factory=list)
+
+
+class IntentPlan(BaseModel):
+    """一轮输入的有序动作计划；顺序已由 LLM 按依赖关系确定。"""
+
+    actions: list[IntentAction] = Field(default_factory=list)
+
+
 class RetrievalHit(BaseModel):
     """精确匹配、Qdrant、BM25 或 rerank 返回的一条命中结果。"""
 
@@ -126,6 +143,20 @@ class EvidenceJudgeResult(BaseModel): # 是一个 Pydantic 数据模型，用来
     missing: list[str] = Field(default_factory=list) # 缺失信息列表。比如“缺少步骤”“缺少原材料”。
 
 
+class ActionResult(BaseModel):
+    """一项 intent action 执行完成后的可聚合结果。"""
+
+    action_index: int
+    intent: Intent | str
+    query: str = ""
+    recommendation_count: int = 0
+    hits: list[RetrievalHit] = Field(default_factory=list)
+    evidence_judge: EvidenceJudgeResult | None = None
+    evidence_retry_count: int = 0
+    answer_hint: str = ""
+    citations: list[Citation] = Field(default_factory=list)
+
+
 class CookingState(BaseModel):
     """每个 thread 的烹饪状态；一个 thread 最多跟踪一道正在做的菜。"""
 
@@ -146,6 +177,7 @@ class TurnTrace(BaseModel):
     recipe_entities: list[str] = Field(default_factory=list)
     recommendation_count: int = 0
     evidence_retry_count: int = 0
+    action_results: list[ActionResult] = Field(default_factory=list)
     qdrant_hits: list[RetrievalHit] = Field(default_factory=list)
     evidence_judge: EvidenceJudgeResult | None = None
     final_citations: list[Citation] = Field(default_factory=list)
