@@ -359,6 +359,9 @@ class AgentNodes:
                 memory=json.dumps(state.get("memory", {}), ensure_ascii=False),
             ),
         )
+        judge = state.get("evidence_judge")
+        if judge is not None and not judge.sufficient:
+            answer = f"{answer.rstrip()}\n\n证据不足"
         citations = [_citation_from_hit(hit).model_dump() for hit in state["hits"][:4]]
         trace = _update_trace(state["trace"], final_citations=[Citation(**item) for item in citations])
         return {**state, "answer": answer, "citations": citations, "trace": trace}

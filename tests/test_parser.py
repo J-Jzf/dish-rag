@@ -48,5 +48,5 @@ def test_low_confidence_marks_missing_fields():
 """
     recipe = parse_recipes_from_pages([page])[0]
 
-    assert recipe.parse_confidence < 0.78
+    assert recipe.parse_confidence < 0.95
     assert recipe.parse_warnings

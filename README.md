@@ -592,7 +592,7 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - 本地 BM25 兜底：无论 Qdrant 是否可用，`retrieval/hybrid.py` 都会再跑 `LocalBM25`，它基于 SQLite chunks 做关键词检索。
 - Rerank 配置兜底：`RerankClient.rerank()` 如果没有配置 `RERANK_BASE_URL`、`RERANK_MODEL_ID`，或没有候选文档，会保留原候选顺序，并给递减分数。
 - 菜名不存在兜底：精确别名找不到时，不自动替换成相似菜，而是进入 HITL，让用户确认候选。
-- 证据不足兜底：`judge_evidence()` 如果没有命中证据，会标记 `sufficient=false`；`answer()` 不编造答案。
+- 证据不足兜底：`judge_evidence()` 如果证据不足，会标记 `sufficient=false`；`answer()` 仍生成回答，但会在末尾追加“证据不足”提示。
 - 烹饪状态兜底：用户问“再下一步”但 checkpoint 没有当前菜谱状态、也没有显式菜名时，系统不全库乱搜，会先问用户正在做哪道菜。
 
 ## 烹饪状态
@@ -606,6 +606,25 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - `last_action`
 
 `CookingState` 是 LangGraph state 的一部分，会由 LangGraph checkpoint 保存到 `LANGGRAPH_CHECKPOINT_DB`。因此同一个 `thread_id` 里，用户后续说“再下一步”“这一步再下一步”“重复一下”“回到上一步”，系统可以直接读取 checkpoint 里的 `current_step_no`，不用重新从全库猜。
+
+### Checkpoint 字段与命名空间
+
+LangGraph checkpoint 使用下面的字段共同定位一条状态版本：
+
+- `thread_id`：对话线程 ID。不同 `thread_id` 可以维护不同的烹饪状态。
+- `checkpoint_ns`：checkpoint 命名空间，用于区分同一个 thread 下的子图、状态分支或不同状态域。当前项目没有显式配置，默认是空字符串 `""`。
+- `checkpoint_id`：某一次图执行后的具体状态版本 ID。
+- `parent_checkpoint_id`：上一个状态版本的 ID，用于把同一个 thread 的 checkpoint 串成状态链。
+
+因此 checkpoint 表的唯一定位关系可以理解为：
+
+```text
+(thread_id, checkpoint_ns, checkpoint_id)
+```
+
+`checkpoint` 字段保存序列化后的 LangGraph state 快照，可能包含 `user_query`、`query_rewrite`、`hits`、`evidence_judge`、`cooking_state`、`answer`、`citations`、`trace` 和 `memory` 等 channel。`writes` 表则保存图节点对这些 channel 的增量写入。checkpoint 不是“一行一轮对话”，而是同一个 thread 下多个连续的状态版本。
+
+如果以后在外层增加 QA、冰箱 Text-to-SQL、闲聊等子图，可以继续共用同一张 checkpoint 表；是否使用不同的 `checkpoint_ns` 取决于是否希望为这些子图建立独立的状态命名空间。顶层意图本身通常直接作为 LangGraph state 字段保存，不必用 `checkpoint_ns` 表示。
 
 当前会更新 `CookingState` 的情况：
 
@@ -683,7 +702,7 @@ CLI 会打印 trace，SQLite 的 `turn_traces` 表也会持久保存 JSON。
 
 ## 人工验收
 
-解析置信度由字段完整性计算。低于 `LOW_CONFIDENCE_THRESHOLD` 的菜谱会进入：
+解析置信度由字段完整性计算。默认 `LOW_CONFIDENCE_THRESHOLD=0.95`；低于该阈值的菜谱会进入：
 
 ```text
 build/review/low_confidence_recipes.md
