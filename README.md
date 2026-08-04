@@ -5,13 +5,75 @@
 ## 当前能力
 
 - PDF -> page Markdown -> recipe JSON -> structural chunks。
-- 按菜谱字段和步骤切分 chunk，不按字符数硬切。
-- SQLite 保存菜谱原始事实、chunks、别名、长期记忆、turn trace。
-- Qdrant 保存 dense vector + BM25 sparse vector hybrid search 索引。
-- 菜名精确匹配和别名匹配，不存在菜名时进入 HITL。
-- LangGraph 编排意图识别、上下文补全、Query 重写、检索、Evidence Judge、生成和状态更新。
-- 每轮保留 raw query、completed query、rewritten query、命中项、分数、过滤条件、证据判断、引用和状态变化。
-- 低置信菜谱输出人工验收清单。
+- 使用 Pydantic 解析标准 JSON；按字段和步骤切分 Chunk，不按字符数硬切；步骤 Chunk 附带步骤号、总步骤数和前后步骤关系 metadata。
+- 解析置信度低于 `LOW_CONFIDENCE_THRESHOLD` 的菜谱会输出人工验收清单；这与在线问答阶段的 Evidence Judge 独立。
+- SQLite 作为事实源，保存菜谱原始事实、chunks、别名、结构化长期记忆和 `turn_traces`；Qdrant 保存 dense vector + BM25 sparse vector 搜索索引。
+- 菜名精确匹配、别名匹配后按 `recipe_id` 过滤检索；菜名不存在但存在相似候选时进入 Human-in-the-loop 确认，不自动替换相似菜。
+- 使用 dense 语义检索、Qdrant BM25 sparse 检索、本地 BM25、RRF 融合和 rerank 重排构成 hybrid 检索。
+- LangGraph 编排上下文补全、多意图规划、Query 重写、检索、Evidence Judge、状态更新、回答和 Trace 持久化；一轮可按语义依赖顺序执行多个 intent action，再汇总回答。
+- 支持菜谱查询、字段查询、开始做菜、步骤导航、推荐、偏好更新、闲聊、拒答和澄清等 intent；推荐默认返回 5 道，用户指定数量时按指定数量处理。
+- Checkpoint 按 `thread_id` 持久化当前菜谱、步骤、HITL 暂停位置、多意图 action 下标和重搜状态，支持“下一步”“重复”“回到上一步”等上下文表达。
+- 长期记忆区分普通偏好与忌口/过敏：普通偏好语义归并且最多保留最近 10 个不同概念；忌口默认只增不减，仅在用户明确解除时删除。
+- Evidence Judge 评估检索证据的相关性、充分性和置信度；不相关、不充分或置信度低于 `0.55` 时最多重搜一次，最终回答附带判断原因与缺失信息。
+- 每轮保留 raw/completed/rewritten query、完整 intent 列表、命中项、分数、过滤条件、Evidence Judge、重搜次数、引用和状态变化；回答以 PDF 页码、菜谱编号和字段/步骤引用溯源。
+
+```mermaid
+flowchart TB
+    subgraph Ingest[知识库构建：离线入库]
+        PDF["设备/菜谱 PDF 手册"] --> Extract["按页提取文本\nPDF -> Markdown"]
+        Extract --> Parse["Pydantic 结构化解析\n标准 JSON + 低置信验收清单"]
+        Parse --> Chunk["字段级 / 步骤级 Chunk\n步骤号、前后关系、总步骤数 metadata"]
+        Parse --> Facts["SQLite 事实源\nrecipes / chunks / aliases"]
+        Chunk --> Facts
+        Chunk --> Index["Qdrant 索引\ndense embedding + BM25 sparse vector"]
+    end
+
+    subgraph Memory[长期记忆与会话状态]
+        Preferences["SQLite user_preferences\n语义归并，最近 10 个普通偏好"]
+        Restrictions["SQLite user_restrictions\n忌口/过敏，只在明确解除时删除"]
+        Checkpoint["LangGraph SQLite checkpoint\nthread_id + checkpoint_ns\n当前对象、步骤、多意图进度、HITL 位置"]
+        TraceDB["SQLite turn_traces\n每轮可观测 Trace"]
+    end
+
+    subgraph Online[Agentic RAG：在线问答]
+        User["用户输入\nthread_id / user_id"] --> Load["读取 checkpoint、结构化长期记忆\n初始化 Trace"]
+        Load --> Intent["LLM 多意图规划\nPydantic IntentPlan.actions\n按语义依赖排序"]
+        Intent --> Action["prepare_action\n逐个执行 action"]
+        Action --> Pref{"preference_update?"}
+        Pref -- 是 --> Resolve["LLM 记忆归并\n新增 / 语义合并 / 明确解除"]
+        Resolve --> Preferences
+        Resolve --> Restrictions
+        Preferences --> Action
+        Restrictions --> Action
+        Pref -- 否 --> Rewrite["上下文补全 + Query 重写\n只注入当前偏好与忌口"]
+        Rewrite --> Entity["菜名/设备实体解析"]
+        Entity --> Exact{"别名/名称精确匹配?"}
+        Exact -- 是 --> Filter["按 recipe_id 过滤"]
+        Exact -- 否 --> HITL{"相似候选需要人工确认?"}
+        HITL -- 是 --> Pause["LangGraph interrupt / HITL"]
+        Pause --> Checkpoint
+        HITL -- 否 --> Hybrid
+        Filter --> Hybrid["Hybrid 检索\nQdrant dense + sparse\n本地 BM25 + RRF"]
+        Hybrid --> Rerank["Rerank 重排"]
+        Rerank --> Judge["Evidence Judge\nrelevant / sufficient / confidence"]
+        Judge --> Retry{"不相关 / 不充分 / < 0.55\n且未重搜?"}
+        Retry -- 是 --> RetryRewrite["LLM 重写检索 Query\n最多重搜一次"]
+        RetryRewrite --> Hybrid
+        Retry -- 否 --> State["更新 CookingState\n仅流程相关 action"]
+        State --> Checkpoint
+        State --> Result["capture_action_result\n保留本 action 的证据、引用、Judge"]
+        Result --> More{"还有下一个 action?"}
+        More -- 是 --> Action
+        More -- 否 --> Answer["LLM 汇总回答\nPDF 引用 + 证据判断说明"]
+        Answer --> Trace["persist_trace + CLI RAG Turn Trace"]
+        Trace --> TraceDB
+    end
+
+    Facts --> Exact
+    Index --> Hybrid
+    Checkpoint --> Load
+    Checkpoint --> State
+```
 
 ## 目录
 
@@ -649,6 +711,18 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - 最后做混淆矩阵，重点看 `recipe_lookup` 和 `field_lookup`、`cooking_start` 和 `cooking_navigation` 是否容易互相误判。
 
 这部分可以后续扩展到 `configs/eval_queries.jsonl`，增加 `expected_intent`、`expected_entities`、`expected_needs_retrieval` 字段，再写一个 `eval-intent` 命令专门评估。
+
+## 结构化长期记忆
+
+长期记忆进一步拆分为 `user_preferences` 与 `user_restrictions`两张表：通用 Agent 提示词只接收当前偏好与忌口，不接收原始 Query、补全 Query 或时间戳。
+
+| 表 | 用途与保留规则 | 字段说明 |
+| --- | --- | --- |
+| `user_preferences` | 保存普通饮食偏好；同义表达由记忆归并 LLM 合并；每个用户仅保留按 `last_seen_at` 排序的最近 10 个不同概念。 | `user_id`：用户；`canonical`：语义归一化名称，也是同一用户内的概念键；`phrases_json`：该概念出现过的原始说法数组；`first_seen_at`：首次记录时间；`last_seen_at`：最近确认时间。 |
+| `user_restrictions` | 保存忌口、过敏和不能吃的食材；不受 10 条上限影响，默认只增不减。 | 字段与 `user_preferences` 相同；只有用户明确表达“不再忌口/不再过敏/现在可以吃”时，记忆归并 LLM 才会输出删除操作。 |
+
+例如，“低脂”与“减脂”可归并为同一个 `canonical`，更新其 `last_seen_at`，并在 `phrases_json` 中同时保留两种原始说法。旧版 `long_term_memory.preference_latest` 首次读取时会保守迁移为忌口，避免遗漏已有风险限制。
+
 
 ## Query 重写保护
 

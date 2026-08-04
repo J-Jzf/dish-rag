@@ -118,6 +118,30 @@ class IntentPlan(BaseModel):
     actions: list[IntentAction] = Field(default_factory=list)
 
 
+class UserMemoryItem(BaseModel):
+    """用户的一条已归并长期偏好或忌口。"""
+
+    canonical: str
+    phrases: list[str] = Field(default_factory=list)
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+
+
+class UserMemorySnapshot(BaseModel):
+    """供记忆归并与通用提示词使用的用户长期记忆快照。"""
+
+    preferences: list[UserMemoryItem] = Field(default_factory=list)
+    restrictions: list[UserMemoryItem] = Field(default_factory=list)
+
+
+class MemoryOperation(BaseModel):
+    """记忆归并模型返回的一项确定性持久化操作。"""
+
+    operation: Literal["add_preference", "merge_preference", "add_restriction", "remove_restriction"]
+    canonical: str
+    phrase: str
+
+
 class RetrievalHit(BaseModel):
     """精确匹配、Qdrant、BM25 或 rerank 返回的一条命中结果。"""
 

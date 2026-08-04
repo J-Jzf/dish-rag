@@ -84,6 +84,15 @@ Evidence Judge 结果：{judge}
 
 请针对缺失信息生成新的检索 Query，只输出：{{"rewritten_query": "..."}}。"""
 
+MEMORY_RESOLUTION_SYSTEM = """你是用户饮食记忆归并器。只输出 JSON。把新表达与已有记忆按语义合并。
+普通偏好使用 add_preference 或 merge_preference；忌口、过敏、不吃、不能吃使用 add_restriction。只有用户明确表达“不再忌口/不再过敏/现在可以吃”时才使用 remove_restriction。低脂与减脂等同义表达应 merge_preference，并保留新旧原始说法。"""
+
+MEMORY_RESOLUTION_USER = """用户本轮表达：{query}
+本轮抽取的限制：{constraints}
+已有结构化记忆：{memory}
+
+只输出 JSON：{{"operations":[{{"operation":"add_preference|merge_preference|add_restriction|remove_restriction","canonical":"语义归一名称","phrase":"用户原始说法"}}]}}。"""
+
 ANSWER_SYSTEM = """你是严谨的菜谱助手。回答必须基于提供的菜谱证据，并带引用。不得把模型推测伪装成菜谱原文。
 当 intent=recommendation 时，按 recommendation_count 推荐不同的菜谱；每道菜只推荐一次，并说明其与用户目标相符的证据。若可追溯证据不足以覆盖要求数量，只推荐有证据的菜谱并明确说明数量不足，不得凑数。"""
 

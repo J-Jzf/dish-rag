@@ -10,6 +10,7 @@ from dish_rag.models import (
     QueryRewrite,
     RetrievalHit,
     TurnTrace,
+    UserMemorySnapshot,
 )
 
 # 一轮对话在图里流动时携带的“共享数据包”
@@ -36,3 +37,4 @@ class DishAgentState(TypedDict, total=False):
     hitl_candidates: list[dict[str, Any]] # HITL 候选列表
     selected_recipe_id: str | None # 用户从 HITL 候选里选择的菜谱 ID。如果用户没选，就是 None。
     memory: dict[str, str] # 长期记忆（例如过敏原、口感偏好），由 start_trace 从 SQLite 里加载。
+    user_memory: UserMemorySnapshot

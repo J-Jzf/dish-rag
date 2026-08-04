@@ -18,9 +18,11 @@ from dish_rag.models import (
     Intent,
     IntentAction,
     IntentPlan,
+    MemoryOperation,
     QueryRewrite,
     RetrievalHit,
     TurnTrace,
+    UserMemorySnapshot,
 )
 from dish_rag.retrieval.hybrid import HybridRetriever
 from dish_rag.safety import check_refusal, detect_constraint_loss, extract_user_constraints
@@ -51,6 +53,7 @@ class AgentNodes:
             **state,
             "cooking_state": cooking_state,
             "memory": memory,
+            "user_memory": self.store.load_user_memory(state.get("user_id", "default")),
             "evidence_retry_count": 0,
             "trace": trace,
         }
@@ -91,7 +94,7 @@ class AgentNodes:
             prompts.INTENT_USER.format(
                 query=state["user_query"],
                 cooking_state=state["cooking_state"].model_dump(),
-                memory=_format_preferences_for_prompt(state.get("memory", {})),
+                memory=_format_user_memory_for_prompt(state.get("user_memory", UserMemorySnapshot())),
             ),
         )
         raw_actions = payload.get("actions")
@@ -149,25 +152,19 @@ class AgentNodes:
         )
 
         if _intent_value(rewrite.intent) == Intent.PREFERENCE_UPDATE.value:
-            memory_value = json.dumps(
-                {
-                    "raw_query": rewrite.raw_query,
-                    "completed_query": rewrite.completed_query,
-                    "preserved_constraints": rewrite.preserved_constraints,
-                },
-                ensure_ascii=False,
-            )
-            self.store.save_memory(state.get("user_id", "default"), "preference_latest", memory_value)
-            memory["preference_latest"] = memory_value
+            user_memory = self._update_user_memory(state, rewrite)
             trace = _update_trace(
                 trace,
-                notes=[*trace.notes, "已在当前动作中写入 SQLite long_term_memory。"],
+                notes=[*trace.notes, "已更新 SQLite 结构化长期偏好/忌口记忆。"],
             )
+        else:
+            user_memory = state.get("user_memory", UserMemorySnapshot())
 
         return {
             **state,
             "query_rewrite": rewrite,
             "memory": memory,
+            "user_memory": user_memory,
             "hits": [],
             "evidence_judge": None,
             "evidence_retry_count": 0,
@@ -176,6 +173,26 @@ class AgentNodes:
             "selected_recipe_id": None,
             "trace": trace,
         }
+
+    def _update_user_memory(self, state: DishAgentState, rewrite: QueryRewrite) -> UserMemorySnapshot:
+        """由 LLM 判断新增、语义合并或显式解除，并由 SQLite 执行确定性更新。"""
+
+        current = state.get("user_memory", UserMemorySnapshot())
+        if self.chat is None:
+            return self.store.apply_memory_operations(
+                state.get("user_id", "default"),
+                [MemoryOperation(operation="add_restriction", canonical=value, phrase=value) for value in rewrite.preserved_constraints],
+            )
+        payload = self.chat.complete_json(
+            prompts.MEMORY_RESOLUTION_SYSTEM,
+            prompts.MEMORY_RESOLUTION_USER.format(
+                query=rewrite.raw_query,
+                constraints=json.dumps(rewrite.preserved_constraints, ensure_ascii=False),
+                memory=current.model_dump_json(),
+            ),
+        )
+        operations = [MemoryOperation.model_validate(item) for item in payload.get("operations", [])]
+        return self.store.apply_memory_operations(state.get("user_id", "default"), operations)
 
     def rewrite_query(self, state: DishAgentState) -> DishAgentState:
         """在保留用户限制条件的前提下重写 Query。"""
@@ -194,7 +211,7 @@ class AgentNodes:
                 recipe_entities=rewrite.recipe_entities,
                 intent=_intent_value(rewrite.intent),
                 recommendation_count=rewrite.recommendation_count,
-                memory=_format_preferences_for_prompt(state.get("memory", {})),
+                memory=_format_user_memory_for_prompt(state.get("user_memory", UserMemorySnapshot())),
                 constraints=constraints,
             ),
         )
@@ -529,7 +546,7 @@ class AgentNodes:
             prompts.MULTI_ACTION_ANSWER_SYSTEM,
             prompts.MULTI_ACTION_ANSWER_USER.format(
                 action_results=_format_action_results(results),
-                memory=_format_preferences_for_prompt(state.get("memory", {})),
+                memory=_format_user_memory_for_prompt(state.get("user_memory", UserMemorySnapshot())),
             ),
         )
         evidence_warning = _format_evidence_warning(
@@ -564,21 +581,13 @@ class AgentNodes:
             answer = "我需要先确认限制条件：你刚才的约束不能被改写或省略，请再说明一次你要保留的禁忌或口味要求。"
             return {**state, "answer": answer}
         if intent == Intent.PREFERENCE_UPDATE.value:
-            memory_value = json.dumps(
-                {
-                    "raw_query": rewrite.raw_query,
-                    "completed_query": rewrite.completed_query,
-                    "preserved_constraints": rewrite.preserved_constraints,
-                },
-                ensure_ascii=False,
-            )
-            self.store.save_memory(state.get("user_id", "default"), "preference_latest", memory_value)
+            user_memory = self._update_user_memory(state, rewrite)
             trace = _update_trace(
                 state["trace"],
-                notes=[*state["trace"].notes, "已把用户偏好/限制写入 SQLite long_term_memory。"],
+                notes=[*state["trace"].notes, "已更新 SQLite 结构化长期偏好/忌口记忆。"],
             )
             answer = "我记下了。涉及食材建议或替换时，我会把这个偏好作为参考，并在关键场景再次向你确认。"
-            return {**state, "answer": answer, "trace": trace}
+            return {**state, "answer": answer, "trace": trace, "user_memory": user_memory}
         if not state.get("hits"):
             navigation_answer = _build_cooking_navigation_answer(state, self.store)
             if navigation_answer:
@@ -608,7 +617,7 @@ class AgentNodes:
                 recommendation_count=rewrite.recommendation_count,
                 evidence=_format_hits(state["hits"]),
                 cooking_state=state["cooking_state"].model_dump(),
-                memory=_format_preferences_for_prompt(state.get("memory", {})),
+                memory=_format_user_memory_for_prompt(state.get("user_memory", UserMemorySnapshot())),
             ),
         )
         judge = state.get("evidence_judge")
@@ -948,6 +957,17 @@ def _format_preferences_for_prompt(memory: dict[str, Any]) -> str:
 
     constraints = _as_string_list(stored_preference.get("preserved_constraints", []))
     return "；".join(constraints) if constraints else "无"
+
+
+def _format_user_memory_for_prompt(memory: UserMemorySnapshot) -> str:
+    """向通用 Agent 提示词提供活跃偏好与忌口，不暴露审计字段。"""
+
+    parts: list[str] = []
+    if memory.preferences:
+        parts.append("偏好：" + "；".join(item.canonical for item in memory.preferences))
+    if memory.restrictions:
+        parts.append("忌口：" + "；".join(item.canonical for item in memory.restrictions))
+    return "\n".join(parts) if parts else "无"
 
 
 def _format_evidence_warning(

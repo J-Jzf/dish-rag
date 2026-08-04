@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
-from dish_rag.models import Recipe, RecipeChunk
+from dish_rag.models import MemoryOperation, Recipe, RecipeChunk, UserMemoryItem, UserMemorySnapshot
 
 
 class SQLiteStore:
@@ -68,6 +68,24 @@ class SQLiteStore:
                     memory_value text not null,
                     updated_at text default current_timestamp,
                     primary key(user_id, memory_key)
+                );
+
+                create table if not exists user_preferences (
+                    user_id text not null,
+                    canonical text not null,
+                    phrases_json text not null,
+                    first_seen_at text default current_timestamp,
+                    last_seen_at text default current_timestamp,
+                    primary key(user_id, canonical)
+                );
+
+                create table if not exists user_restrictions (
+                    user_id text not null,
+                    canonical text not null,
+                    phrases_json text not null,
+                    first_seen_at text default current_timestamp,
+                    last_seen_at text default current_timestamp,
+                    primary key(user_id, canonical)
                 );
 
                 create table if not exists turn_traces (
@@ -215,6 +233,71 @@ class SQLiteStore:
             ).fetchall()
         return {row["memory_key"]: row["memory_value"] for row in rows}
 
+    def load_user_memory(self, user_id: str) -> UserMemorySnapshot:
+        """加载结构化偏好和忌口；普通偏好按最近确认时间排序。"""
+
+        with self.connect() as connection:
+            preferences = connection.execute(
+                "select canonical, phrases_json, first_seen_at, last_seen_at from user_preferences where user_id = ? order by last_seen_at desc",
+                (user_id,),
+            ).fetchall()
+            restrictions = connection.execute(
+                "select canonical, phrases_json, first_seen_at, last_seen_at from user_restrictions where user_id = ? order by last_seen_at desc",
+                (user_id,),
+            ).fetchall()
+        snapshot = UserMemorySnapshot(
+            preferences=[_memory_item_from_row(row) for row in preferences],
+            restrictions=[_memory_item_from_row(row) for row in restrictions],
+        )
+        if snapshot.preferences or snapshot.restrictions:
+            return snapshot
+        legacy = self.load_memory(user_id).get("preference_latest")
+        if not legacy:
+            return snapshot
+        try:
+            constraints = json.loads(legacy).get("preserved_constraints", [])
+        except (json.JSONDecodeError, AttributeError):
+            return snapshot
+        return self.apply_memory_operations(
+            user_id,
+            [MemoryOperation(operation="add_restriction", canonical=str(value), phrase=str(value)) for value in constraints],
+        )
+
+    def apply_memory_operations(self, user_id: str, operations: Iterable[MemoryOperation]) -> UserMemorySnapshot:
+        """应用已校验的记忆操作，并把不同普通偏好裁剪为最近十条。"""
+
+        with self.connect() as connection:
+            for operation in operations:
+                table = "user_restrictions" if operation.operation.endswith("restriction") else "user_preferences"
+                if operation.operation == "remove_restriction":
+                    connection.execute(
+                        "delete from user_restrictions where user_id = ? and canonical = ?",
+                        (user_id, operation.canonical),
+                    )
+                    continue
+                row = connection.execute(
+                    f"select phrases_json from {table} where user_id = ? and canonical = ?",
+                    (user_id, operation.canonical),
+                ).fetchone()
+                phrases = json.loads(row["phrases_json"]) if row else []
+                if operation.phrase and operation.phrase not in phrases:
+                    phrases.append(operation.phrase)
+                connection.execute(
+                    f"""insert into {table}(user_id, canonical, phrases_json)
+                        values (?, ?, ?)
+                        on conflict(user_id, canonical) do update set
+                            phrases_json=excluded.phrases_json,
+                            last_seen_at=current_timestamp""",
+                    (user_id, operation.canonical, json.dumps(phrases, ensure_ascii=False)),
+                )
+            connection.execute(
+                """delete from user_preferences where user_id = ? and canonical not in (
+                    select canonical from user_preferences where user_id = ? order by last_seen_at desc limit 10
+                )""",
+                (user_id, user_id),
+            )
+        return self.load_user_memory(user_id)
+
     def append_trace(self, thread_id: str, payload: dict[str, Any]) -> None:
         """持久化一轮可观测 trace。"""
 
@@ -254,3 +337,12 @@ def _rank_aliases(
             reverse=True,
         )
     return ranked[:limit]
+
+
+def _memory_item_from_row(row: sqlite3.Row) -> UserMemoryItem:
+    return UserMemoryItem(
+        canonical=row["canonical"],
+        phrases=json.loads(row["phrases_json"]),
+        first_seen_at=row["first_seen_at"] or "",
+        last_seen_at=row["last_seen_at"] or "",
+    )
