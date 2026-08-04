@@ -303,7 +303,7 @@ python main.py ingest
 7. `models.py`：`Recipe` 定义标准菜谱结构，字段包括 `recipe_id`、`name`、`ingredients`、`steps`、`allergens`、`storage`、`page_start` 等。parser 最终产出的就是 `Recipe` 对象。
 8. `ingest/chunker.py`：`chunk_recipe()` 不按字符数切，而是按结构切：基础信息一个 chunk、原材料一个 chunk、每个步骤一个 chunk、口味/人群/标签/过敏原/厨具/替换/保存分别成 chunk。每个 chunk 都带 `recipe_id`、菜名、字段、页码和步骤号；步骤 chunk 还会带 `previous_step_no`、`next_step_no`、`total_steps`，用于回答“某个操作之后下一步是什么”。
 9. `ingest/exporter.py`：输出 `build/recipes.json`、`build/chunks.jsonl`、`build/markdown/recipes.md` 和 `build/review/low_confidence_recipes.md`。
-10. `storage/sqlite_store.py`：`SQLiteStore.migrate()` 建表；`upsert_recipes()` 写入菜谱事实和别名；`upsert_chunks()` 写入 chunk。SQLite 是事实源，后续回答引用时应以这里的数据为准。
+10. `storage/sqlite_store.py`：`SQLiteStore.migrate()` 建表；`upsert_recipes()` 写入菜谱事实和别名；`upsert_chunks()` 写入 chunk。SQLite 是事实源，后续回答引用时应以这里的数据为准（实际是用的每一个 chunk 的 payload 中的文本）。
 11. `ingest/pipeline.py` 的 `_index_qdrant()`：如果启用 Qdrant 索引，会调用 `EmbeddingClient` 生成稠密向量，调用 `SparseBM25Encoder` 生成 BM25 稀疏向量，再写入 Qdrant。
 12. `storage/qdrant_store.py`：`QdrantRecipeIndex.recreate_collection()` 创建包含 `dense` 和 `bm25` 两种向量的 collection；`upsert_chunks()` 把 chunk 文本、元数据和向量写入 Qdrant。
 
@@ -845,6 +845,12 @@ kitchen-002：麻婆豆腐，当前第 1 步
 
 如果菜谱原文没有写某个处理方案，回答可以给“模型补充建议”，但必须明确标注，不能假装来自 PDF。
 
+当前 hybrid 检索后：
+- Qdrant 命中会直接从 payload 读取 text，组成 RetrievalHit.text；
+- 最终回答的证据片段 prompt 主要使用这些 RetrievalHit.text，并非根据 metadata 回 SQLite 再取一次真实 chunk；
+- SQLite 回取完整事实目前主要用于“下一步/上一步”等烹饪导航：根据命中的 step_no 从完整 Recipe.steps 读取步骤。
+  - SQLite 仍可称为“事实源”，因为它保存的是入库后的权威、完整、可重建数据：结构化菜谱、原始 chunk、别名、页码等；Qdrant 的向量和 payload 是从 SQLite 派生出的可重建搜索索引副本。“事实源”不等于“每次回答都必须直接从它取文本”。当前普通回答直接使用 Qdrant 的 chunk 文本副本，是性能和实现简化上的选择。
+
 ## 可观测性
 
 每轮 trace 包含：
@@ -893,6 +899,12 @@ build/review/low_confidence_recipes.md
    - 解决：明确只有 cooking_navigation 会更新 CookingState；推荐、偏好更新、知识问答不会推进或覆盖当前步骤。
 5. 长期记忆同一类口味可能有多种表达，容易冗余。
    - 解决：大模型提取按语义归并的 canonical 和原始文本，只在 prompt 中注入当前有效偏好与忌口的 canonical 内容。
+6. 回答速度与性能。
+    - 解决：不应该所有问题都走检索，一些确定性的问题如（直接问）“下一步”，应直接从 checkpoint 中搜索状态，不进入向量检索。
+7. Query Rewrite 可能损失用户约束。
+    - 解决：在一个 json 中保存，Rewrite 后必须校验。
+8. 回答不能只看 embedding 相似度。
+    - 解决：增加一个 LLM-as-JUDGE 节点。
 
 ## 最有可能的问题（执行不符合预期）的地方
 
