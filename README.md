@@ -634,7 +634,7 @@ python main.py search "麻婆豆腐有哪些过敏原"
 本项目不是“用户问一句就固定检索一次”的普通 RAG，而是用 LangGraph 把多个判断节点串起来。自主决策主要体现在这些地方：
 
 - 是否拒答：`safety.py` 和 `nodes.classify_intent()` 会先判断请求是否涉及高风险或医疗化内容。
-- 多意图规划与顺序：`nodes.classify_intent()` 会让 LLM 输出有序 `IntentPlan.actions`；LLM 按语义依赖决定执行顺序，例如先执行 `preference_update`，再让 `recommendation` 使用本轮更新后的偏好。
+- 多意图规划与顺序：`nodes.classify_intent()` 会让 LLM 输出有序 `IntentPlan.actions`；LLM 按语义依赖（根据 prompt 的要求）决定执行顺序，例如会先执行影响后续检索的 preference_update，再执行可使用该记忆的 recommendation 等 action。
 - 判断单项意图：每个 action 可以是查菜谱、问字段、开始做菜、问下一步、推荐、更新偏好或普通闲聊。
 - 是否需要检索：意图识别结果里有 `needs_retrieval`，不需要检索的问题不会强行走向量库。
 - 上下文补全：如果用户说“它下一步怎么做”，系统会结合当前 thread 的烹饪状态补全“它”指哪道菜。
@@ -719,6 +719,20 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - 最后做混淆矩阵，重点看 `recipe_lookup` 和 `field_lookup`、`cooking_start` 和 `cooking_navigation` 是否容易互相误判。
 
 这部分可以后续扩展到 `configs/eval_queries.jsonl`，增加 `expected_intent`、`expected_entities`、`expected_needs_retrieval` 字段，再写一个 `eval-intent` 命令专门评估。
+
+### 多意图顺序执行
+
+一条用户输入不再限制为一个 intent。`classify_intent()` 会让 LLM 输出一个经 Pydantic 校验的 `IntentPlan.actions` 列表，每个动作包含 intent、补全 Query、菜名实体、推荐数量、是否检索和必须保留的限制。LLM 按语义依赖安排动作顺序：会影响后续检索的 `preference_update` 会先执行，随后动作可以使用本轮刚保存的偏好。
+
+```text
+用户：我健身、不吃花生，推荐 3 道高蛋白菜；另外宫保鸡丁下一步是什么？
+-> preference_update：经记忆归并后写入 SQLite user_preferences / user_restrictions，并同步本轮 user_memory
+-> recommendation：携带更新后的 memory，走 rewrite -> hybrid -> rerank -> Evidence Judge
+-> cooking_navigation：从 checkpoint 读取宫保鸡丁状态并推进步骤
+-> answer：合并上述三个动作为一次回答，并保留各自引用
+```
+
+每项动作执行完成后都会写入 `action_results`，再执行下一项，因此后续动作不会覆盖前面动作的 hits、Evidence Judge 或引用。需要检索的动作各自最多重检索一次；`recommendation` 不更新 `CookingState`，而 `cooking_start`、`recipe_lookup`、步骤型 `field_lookup` 和 `cooking_navigation` 仍按原有规则更新做菜状态。若某项动作进入 HITL，LangGraph checkpoint 会保存当前动作下标，用户确认后从该动作继续，完成后再执行后续动作。
 
 ## 结构化长期记忆
 
@@ -821,20 +835,6 @@ kitchen-002：麻婆豆腐，当前第 1 步
 
 如果既没有当前菜谱状态，也没有显式菜名，系统不会全库检索后随便选一道菜，而是先问用户正在做哪道菜。
 
-## 多意图顺序执行
-
-一条用户输入不再限制为一个 intent。`classify_intent()` 会让 LLM 输出一个经 Pydantic 校验的 `IntentPlan.actions` 列表，每个动作包含 intent、补全 Query、菜名实体、推荐数量、是否检索和必须保留的限制。LLM 按语义依赖安排动作顺序：会影响后续检索的 `preference_update` 会先执行，随后动作可以使用本轮刚保存的偏好。
-
-```text
-用户：我健身、不吃花生，推荐 3 道高蛋白菜；另外宫保鸡丁下一步是什么？
--> preference_update：经记忆归并后写入 SQLite user_preferences / user_restrictions，并同步本轮 user_memory
--> recommendation：携带更新后的 memory，走 rewrite -> hybrid -> rerank -> Evidence Judge
--> cooking_navigation：从 checkpoint 读取宫保鸡丁状态并推进步骤
--> answer：合并上述三个动作为一次回答，并保留各自引用
-```
-
-每项动作执行完成后都会写入 `action_results`，再执行下一项，因此后续动作不会覆盖前面动作的 hits、Evidence Judge 或引用。需要检索的动作各自最多重检索一次；`recommendation` 不更新 `CookingState`，而 `cooking_start`、`recipe_lookup`、步骤型 `field_lookup` 和 `cooking_navigation` 仍按原有规则更新做菜状态。若某项动作进入 HITL，LangGraph checkpoint 会保存当前动作下标，用户确认后从该动作继续，完成后再执行后续动作。
-
 ## 溯源与回答
 
 回答必须引用 PDF 页码、菜谱编号、字段或步骤，格式类似：
@@ -880,3 +880,17 @@ build/review/low_confidence_recipes.md
 ```
 
 验收时优先检查字段缺失、步骤数量异常、过敏原为空、厨具与替换混淆、页码是否正确。
+
+## 最有可能的问题
+
+### 多意图识别与执行顺序依赖一次 LLM 规划
+
+`classify_intent()` 会在一次调用中输出按语义依赖排序的 `IntentPlan.actions`，后续 LangGraph 图会按该列表逐项执行。当前没有专门检查“是否漏掉某个意图”或“意图及顺序是否正确”的第二个判断节点；如果 LLM 漏识别了某个 action，系统不会自动补回。Evidence Judge 只判断检索证据是否相关、充分和自信，不能发现意图遗漏。
+
+### 长期记忆归并可能误判
+
+普通偏好的同义归并、忌口/过敏的新增，以及明确解除忌口后的删除，均由记忆归并 LLM 输出结构化操作。若它将普通偏好错误归为忌口，或把不同概念错误合并，错误记忆会影响后续轮次的检索和回答；其中忌口默认长期保留，影响尤其明显。
+
+### 检索结果存在波动
+
+rewrite、向量 embedding、rerank 和 Evidence Judge 都依赖模型输出，同一问题在不同调用中可能得到不同的候选排序、分数或证据判断。系统会通过 trace 保留每轮命中项、分数、重搜次数和判断结果以便定位问题，但当前离线评测主要衡量检索指标，尚未覆盖完整端到端回答的一致性回归。
