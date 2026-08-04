@@ -43,8 +43,8 @@ flowchart TB
         Pref -- 是 --> Resolve["LLM 记忆归并\n新增 / 语义合并 / 明确解除"]
         Resolve --> Preferences
         Resolve --> Restrictions
-        Preferences --> Action
-        Restrictions --> Action
+        Preferences --> Rewrite
+        Restrictions --> Rewrite
         Pref -- 否 --> Rewrite["上下文补全 + Query 重写\n只注入当前偏好与忌口"]
         Rewrite --> Entity["菜名/设备实体解析"]
         Entity --> Exact{"别名/名称精确匹配?"}

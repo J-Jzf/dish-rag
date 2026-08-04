@@ -6,3 +6,4 @@ var/
 build/
 *.pdftotext.txt
 tmp_pdf_extract.txt
+docs/
