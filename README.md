@@ -69,8 +69,9 @@ flowchart TB
         Trace --> TraceDB
     end
 
-    Facts --> Exact
-    Index --> Hybrid
+        Facts --> Exact
+        Facts --> Hybrid
+        Index --> Hybrid
     Checkpoint --> Load
     Checkpoint --> State
 ```
@@ -326,7 +327,9 @@ python main.py ingest
   - recipes 表（整道菜的完整结构化事实）
   - chunks 表（每个 chunk 的完整原文内容）
   - aliases 表（保存菜名和别名，用于精确匹配）
-  - long_term_memory 表（长期偏好、过敏信息等）
+  - long_term_memory 表
+    - user_preferences 表（结构化普通偏好，语义归并后保留最近 10 个不同概念）
+    - user_restrictions 表（结构化忌口/过敏，默认只增不减）
   - turn_traces 表（每轮可观测 trace，即系统这一轮为什么这么回答的“流水账”）
 
 ### chunk 的 text 和 metadata
@@ -417,13 +420,14 @@ python main.py chat "我要做宫保鸡丁，下一步怎么做？" --thread-id 
 1. `main.py`：启动 CLI。
 2. `cli.py`：`chat()` 命令调用 `make_graph()` 创建 LangGraph 应用，并把 `thread_id`、`user_id`、`user_query` 放入初始状态。
 3. `factory.py`：组装依赖。`make_store()` 创建 SQLite 事实库；`make_retriever()` 创建混合检索器；`make_graph()` 创建模型客户端、检索器、节点容器和 LangGraph 图。
-4. `agent/graph.py`：定义图的节点顺序：`start_trace -> classify_intent -> rewrite_query -> retrieve -> judge_evidence -> update_cooking_state -> answer -> persist_trace`。如果菜名不存在但有相似候选，会走 `hitl_recipe_choice`。
+4. `agent/graph.py`：定义多意图循环图：`start_trace -> classify_intent -> prepare_action -> rewrite_query -> retrieve -> judge_evidence -> update_cooking_state -> capture_action_result`；若还有 action 则回到 `prepare_action`，否则 `answer -> persist_trace`。证据不合格时会经 `retry_evidence` 最多重搜一次；菜名不存在但有相似候选时会走 `hitl_recipe_choice`。
 5. `agent/state.py`：定义图中流动的状态字段，例如原始问题、重写结果、检索命中、证据判断、回答、引用、烹饪状态和 trace。
-6. `agent/nodes.py` 的 `start_trace()`：加载当前用户长期记忆，记录本轮开始前的烹饪状态。
-7. `safety.py` 和 `nodes.classify_intent()`：先做拒答检查，再调用 LLM 识别意图、补全上下文、抽取菜谱实体和用户限制。
-8. `nodes.rewrite_query()`：调用 LLM 重写 Query，但必须保留“不辣、不要花生、过敏”等限制。`detect_constraint_loss()` 如果发现限制丢失，会把意图改成 `need_clarification`，不继续错误检索。
-9. `retrieval/name_index.py`：如果识别到菜名，先做别名精确匹配。精确命中后用 `recipe_id` 过滤检索，避免把相似菜混进来。
-10. `retrieval/hybrid.py`：`retrieve()` 先尝试 Qdrant 稠密+稀疏混合检索，再用本地 BM25 兜底，把结果去重后交给 rerank。
+6. `agent/nodes.py` 的 `start_trace()`：加载当前用户结构化长期记忆和 checkpoint 状态，记录本轮开始前的烹饪状态。
+7. `safety.py` 和 `nodes.classify_intent()`：先做拒答检查，再调用 LLM 规划经 Pydantic 校验的有序 `IntentPlan.actions`，抽取实体、限制并按语义依赖安排执行顺序。
+8. `nodes.prepare_action()`：取出当前 `IntentPlan.actions[current_action_index]`，重置上一 action 的临时检索状态；若为 `preference_update`，先归并并写入结构化偏好/忌口，使后续 action 可立即使用本轮记忆。
+9. `nodes.rewrite_query()`：调用 LLM 重写 Query，但必须保留“不辣、不要花生、过敏”等限制。`detect_constraint_loss()` 如果发现限制丢失，会把 intent 改成 `need_clarification`，不继续错误检索。
+10. `retrieval/name_index.py`：如果识别到菜名，先做别名精确匹配。精确命中后用 `recipe_id` 过滤检索，避免把相似菜混进来。
+11. `retrieval/hybrid.py`：`retrieve()` 使用 Qdrant 稠密/稀疏检索和 SQLite chunks 的本地 BM25，RRF 融合、去重后交给 rerank。
     - embedding 更像“先各自理解，再比距离”；
     - rerank 更像“把问题和候选答案放一起精读打分”。
 11. `storage/qdrant_store.py`：`hybrid_search()` 使用稠密向量和 BM25 稀疏向量分别预检索，再用 RRF 融合结果。
@@ -479,12 +483,14 @@ start_trace
 
 Agentic RAG 的“自主决策”主要体现在 LangGraph 节点里：
 
-- `classify_intent`：判断用户意图、是否需要检索、是否是做菜导航。
-- `rewrite_query`：根据上下文补全 Query，并检查过敏、禁忌、不辣等限制是否被保留。
-- `retrieve`：先做菜名精确匹配；菜名不存在时不自动替换，而是进入 HITL。
-- `judge_evidence`：判断检索结果是否相关且足够。
-- `update_cooking_state`：维护当前 thread 正在做哪道菜、做到第几步。
-- `answer`：根据证据回答；没有证据时拒绝编造或自动替换。
+- `classify_intent`：通过 LLM 输出经 Pydantic 校验的 `IntentPlan.actions`，识别一个或多个 intent、是否检索、实体和限制，并按语义依赖规划执行顺序。
+  - `prepare_action`：逐项装载当前 action、清理上一 action 的临时检索状态；偏好更新会先归并写入结构化长期记忆，使后续 action 可立即使用。
+- `rewrite_query`：根据 checkpoint、当前偏好与忌口补全并重写 Query，同时检查限制是否被保留。
+- `retrieve`：优先菜名精确匹配并按 `recipe_id` 过滤；否则按需要进入全库 hybrid 或 HITL，不自动替换相似菜。
+- `judge_evidence` 与 `retry_evidence`：判断相关性、充分性和置信度；不相关、不充分或低置信度时最多重搜一次。
+- `update_cooking_state`：仅为流程相关 action 维护当前菜谱和步骤。
+- `capture_action_result`：隔离保存每项 action 的命中、Judge、重搜次数和引用，避免后续 action 覆盖前项结果。
+- `answer`：在所有 action 完成后汇总回答，保留 PDF 引用，并附上证据不足的判断原因。
 
 示例 1：用户问“宫保鸡丁怎么做”
 
@@ -628,20 +634,22 @@ python main.py search "麻婆豆腐有哪些过敏原"
 本项目不是“用户问一句就固定检索一次”的普通 RAG，而是用 LangGraph 把多个判断节点串起来。自主决策主要体现在这些地方：
 
 - 是否拒答：`safety.py` 和 `nodes.classify_intent()` 会先判断请求是否涉及高风险或医疗化内容。
-- 判断用户意图：`nodes.classify_intent()` 会判断用户是在查菜谱、问字段、开始做菜、问下一步、更新偏好，还是普通闲聊。
+- 多意图规划与顺序：`nodes.classify_intent()` 会让 LLM 输出有序 `IntentPlan.actions`；LLM 按语义依赖决定执行顺序，例如先执行 `preference_update`，再让 `recommendation` 使用本轮更新后的偏好。
+- 判断单项意图：每个 action 可以是查菜谱、问字段、开始做菜、问下一步、推荐、更新偏好或普通闲聊。
 - 是否需要检索：意图识别结果里有 `needs_retrieval`，不需要检索的问题不会强行走向量库。
 - 上下文补全：如果用户说“它下一步怎么做”，系统会结合当前 thread 的烹饪状态补全“它”指哪道菜。
 - 菜谱实体解析：系统会抽取 Query 里的菜名实体，比如“宫保鸡丁”。
 - Query 重写：`nodes.rewrite_query()` 会把原始问题改写成更适合检索的 Query。
+- action 执行准备：`nodes.prepare_action()` 会装载当前 action、清理上一 action 的 hits/Judge/HITL 临时状态；偏好更新先调用记忆归并 LLM，写入 `user_preferences` 或 `user_restrictions`。
 - 约束保护：重写时不能删除“不辣、不要花生、过敏”等限制；如果发现限制丢失，会转为澄清，不继续错误检索。
 - 菜名精确匹配优先：`retrieval/name_index.py` 先查 SQLite aliases；精确命中后用 `recipe_id` 过滤检索，避免相似菜混入。
 - 步骤状态导航：`retrieval/hybrid.py` 负责召回用户描述的操作对应的步骤 chunk；`agent/nodes.py` 会根据命中的 `step_no` 同步 `CookingState.current_step_no`，或在没有检索时直接按 checkpoint 推进。
 - 菜名不存在时 HITL：如果菜名不存在，系统不会自动替换成相似菜，而是暂停图执行，让用户确认是否选择候选。
 - 检索方式选择与融合：`retrieval/hybrid.py` 会组合 Qdrant 稠密检索、BM25 稀疏检索、本地 BM25 兜底和 rerank。
-- 证据是否足够：`nodes.judge_evidence()` 会判断命中内容是否相关、是否足够回答，并输出 `confidence` 和缺失项。
+- 证据是否足够：`nodes.judge_evidence()` 会判断命中内容是否相关、是否足够回答，并输出 `confidence`、原因和缺失项；不相关、不充分或 `confidence < 0.55` 时会经 `retry_evidence` 最多重搜一次。
 - 烹饪状态更新：`nodes.update_cooking_state()` 会维护当前 thread 正在做哪道菜、做到第几步，并理解“下一步、重复、上一步”。
-- 回答边界控制：`nodes.answer()` 会基于证据回答；没有证据时不编造，不把相似菜当成用户指定菜。
-- 可观测性记录：`nodes.persist_trace()` 会保存每轮 raw query、rewritten query、命中项、分数、证据判断、引用和状态变化，方便回放决策过程。
+- action 结果隔离与回答边界控制：`nodes.capture_action_result()` 会保存每项 action 的独立结果；`nodes.answer()` 再按原顺序合并回答，基于证据引用 PDF，不编造、不把相似菜当成用户指定菜。
+- 可观测性记录：`nodes.persist_trace()` 会保存每轮 raw/completed/rewritten query、完整 action 结果、命中项、分数、证据判断、重搜次数、引用和状态变化，方便回放决策过程。
   - checkpoint = LangGraph 保存的图运行状态；
     - HITL：checkpoint 用来暂停后继续
     - 上下文/突然换问题：checkpoint 用来记住 thread 状态，辅助理解和状态切换
@@ -676,12 +684,12 @@ python main.py search "麻婆豆腐有哪些过敏原"
 - `recommendation`
   - 含义：根据用户的使用场景、适用人群、饮食目标、口味或限制，从菜谱库中推荐多道候选菜；不要求用户先给出具体菜名。
   - 例子：`推荐 3 道适合健身、方便做的高蛋白菜。`、`老人少油菜有什么推荐？`
-  - 后续处理：复用 `Query 重写 -> Qdrant dense/BM25 + 本地 BM25 -> rerank -> Evidence Judge -> 回答` 链路。检索会扩大候选范围，再按 `recipe_id` 去重，保证返回的是不同菜谱而非同一道菜的多个 chunk。LLM 在意图识别阶段抽取用户指定的数量；未指定时默认推荐 5 道。当前版本不同时写入长期偏好，单纯“记住我的偏好”仍属于 `preference_update`。
+  - 后续处理：复用 `Query 重写 -> Qdrant dense/BM25 + 本地 BM25 -> rerank -> Evidence Judge -> 回答` 链路。检索会扩大候选范围，再按 `recipe_id` 去重，保证返回的是不同菜谱而非同一道菜的多个 chunk。LLM 在意图识别阶段抽取用户指定的数量；未指定时默认推荐 5 道。推荐本身不写入长期记忆；若同一输入还包含偏好或忌口更新，LLM 会将 `preference_update` 排在前面，推荐 action 可使用本轮刚更新的结构化记忆。
 
 - `preference_update`
   - 含义：用户更新长期偏好、禁忌或过敏信息。
   - 例子：`我不吃花生，以后都少辣。`
-  - 后续处理：通常不走 hybrid；`answer()` 会把偏好/限制写入 SQLite `long_term_memory`，后续涉及食材建议、替换、过敏风险时再读出并提醒用户确认。数据库会保留原始 Query、补全 Query 和 `preserved_constraints` 以便审计，但注入后续 LLM 提示词的只有 `preserved_constraints`，并以“用户偏好”形式提供。
+  - 后续处理：通常不走 hybrid；`prepare_action()` 调用记忆归并 LLM，将结果写入 SQLite 的 `user_preferences` 和 `user_restrictions`。普通偏好按语义归并并只保留最近 10 个不同概念；忌口/过敏默认只增不减，只有用户明确表示不再忌口、不再过敏或现在可以吃时才删除。后续 LLM 提示词只注入活跃偏好和忌口的 `canonical` 内容，不注入原始 Query、补全 Query、原始说法或内部时间戳。
 
 - `chitchat`
   - 含义：普通闲聊或不需要菜谱证据的问题。
@@ -819,7 +827,7 @@ kitchen-002：麻婆豆腐，当前第 1 步
 
 ```text
 用户：我健身、不吃花生，推荐 3 道高蛋白菜；另外宫保鸡丁下一步是什么？
--> preference_update：写入 SQLite long_term_memory，并同步本轮 memory
+-> preference_update：经记忆归并后写入 SQLite user_preferences / user_restrictions，并同步本轮 user_memory
 -> recommendation：携带更新后的 memory，走 rewrite -> hybrid -> rerank -> Evidence Judge
 -> cooking_navigation：从 checkpoint 读取宫保鸡丁状态并推进步骤
 -> answer：合并上述三个动作为一次回答，并保留各自引用
