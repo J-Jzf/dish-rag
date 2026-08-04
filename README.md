@@ -22,21 +22,21 @@ flowchart TB
     subgraph Ingest[知识库构建：离线入库]
         PDF["设备/菜谱 PDF 手册"] --> Extract["按页提取文本\nPDF -> Markdown"]
         Extract --> Parse["Pydantic 结构化解析\n标准 JSON + 低置信验收清单"]
-        Parse --> Chunk["字段级 / 步骤级 Chunk\n步骤号、前后关系、总步骤数 metadata"]
+        Parse --> Chunk["字段级 / 步骤级 Chunk\n步骤号、前后关系、总步骤数 \nmetadata"]
         Parse --> Facts["SQLite 事实源\nrecipes / chunks / aliases"]
         Chunk --> Facts
-        Chunk --> Index["Qdrant 索引\ndense embedding + BM25 sparse vector"]
+        Chunk --> Index["Qdrant 索引\ndense embedding + \nBM25 sparse vector"]
     end
 
     subgraph Memory[长期记忆与会话状态]
-        Preferences["SQLite user_preferences\n语义归并，最近 10 个普通偏好"]
-        Restrictions["SQLite user_restrictions\n忌口/过敏，只在明确解除时删除"]
-        Checkpoint["LangGraph SQLite checkpoint\nthread_id + checkpoint_ns\n当前对象、步骤、多意图进度、HITL 位置"]
+        Preferences["SQLite user_preferences\n语义归并，\n最近 10 个普通偏好"]
+        Restrictions["SQLite user_restrictions\n忌口/过敏，\n只在明确解除时删除"]
+        Checkpoint["LangGraph SQLite checkpoint\nthread_id + checkpoint_ns\n当前对象、步骤、多意图进度、\nHITL 位置"]
         TraceDB["SQLite turn_traces\n每轮可观测 Trace"]
     end
 
     subgraph Online[Agentic RAG：在线问答]
-        User["用户输入\nthread_id / user_id"] --> Load["读取 checkpoint、结构化长期记忆\n初始化 Trace"]
+        User["用户输入\nthread_id / user_id"] --> Load["读取 checkpoint、长期记忆\n初始化 Trace"]
         Load --> Intent["LLM 多意图规划\nPydantic IntentPlan.actions\n按语义依赖排序"]
         Intent --> Action["prepare_action\n逐个执行 action"]
         Action --> Pref{"preference_update?"}
@@ -48,7 +48,7 @@ flowchart TB
         Pref -- 否 --> Rewrite["上下文补全 + Query 重写\n只注入当前偏好与忌口"]
         Rewrite --> NeedRetrieval{"needs_retrieval?"}
         NeedRetrieval -- 否 --> DirectNavigation{"直接步骤导航\n且 checkpoint 有当前状态?"}
-        DirectNavigation -- 是 --> CheckpointNavigation["读取 checkpoint 当前对象/步骤\nSQLite Recipe.steps 读取步骤文本"]
+        DirectNavigation -- 是 --> CheckpointNavigation["读取 checkpoint 当前对象/步骤\nSQLite Recipe.steps \n读取步骤文本"]
         DirectNavigation -- 否 --> SkipHybrid["偏好更新 / 闲聊 / 无状态导航\n跳过实际 Hybrid 检索"]
         CheckpointNavigation --> Judge
         SkipHybrid --> Judge
@@ -61,24 +61,24 @@ flowchart TB
         HITL -- 否 --> Hybrid
         Filter --> Hybrid["Hybrid 检索\nQdrant dense + sparse\n本地 BM25 + RRF"]
         Hybrid --> Rerank["Rerank 重排"]
-        Rerank --> Evidence["回答证据 RetrievalHit.text\n优先来自 Qdrant payload.text\n本地 BM25 兜底时来自 SQLite chunks.text"]
+        Rerank --> Evidence["回答证据 RetrievalHit.text\n优先来自 Qdrant payload.text\n本地 BM25 兜底时来自 \nSQLite chunks.text"]
         Evidence --> Judge["Evidence Judge\nrelevant / sufficient / confidence"]
         Judge --> Retry{"不相关 / 不充分 / < 0.55\n且未重搜?"}
         Retry -- 是 --> RetryRewrite["LLM 重写检索 Query\n最多重搜一次"]
         RetryRewrite --> Hybrid
-        Retry -- 否 --> State["按 intent 同步 CookingState\n流程导航必更新；菜谱/步骤命中也可能同步"]
+        Retry -- 否 --> State["按 intent 同步 CookingState\n流程导航必更新；\n菜谱/步骤命中也可能同步"]
         State --> Checkpoint
-        State --> Result["capture_action_result\n保留本 action 的证据、引用、Judge"]
+        State --> Result["capture_action_result\n保留本 action 的证据、\n引用、Judge"]
         Result --> More{"还有下一个 action?"}
         More -- 是 --> Action
-        More -- 否 --> Answer["汇总最终回答\n普通 RAG 使用 RetrievalHit.text\n流程导航使用 checkpoint + SQLite 步骤\nPDF 引用 + 证据判断说明"]
-        Answer --> Trace["persist_trace + CLI RAG Turn Trace"]
+        More -- 否 --> Answer["汇总最终回答\n普通 RAG 使用 RetrievalHit.text\n流程导航使用 \ncheckpoint + SQLite 步骤\nPDF 引用 + 证据判断说明"]
+        Answer --> Trace["persist_trace + \nCLI RAG Turn Trace"]
         Trace --> TraceDB
     end
 
         Facts --> Exact
         Facts -->|SQLite chunks 本地 BM25 兜底| Hybrid
-        Index -->|向量、BM25 sparse 与 payload.text| Hybrid
+        Index -->|向量、BM25 与 payload.text| Hybrid
     Checkpoint --> Load
     Checkpoint --> State
 ```
