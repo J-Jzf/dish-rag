@@ -46,7 +46,13 @@ flowchart TB
         Preferences --> Rewrite
         Restrictions --> Rewrite
         Pref -- 否 --> Rewrite["上下文补全 + Query 重写\n只注入当前偏好与忌口"]
-        Rewrite --> Entity["菜名/设备实体解析"]
+        Rewrite --> NeedRetrieval{"needs_retrieval?"}
+        NeedRetrieval -- 否 --> DirectNavigation{"直接步骤导航\n且 checkpoint 有当前状态?"}
+        DirectNavigation -- 是 --> CheckpointNavigation["读取 checkpoint 当前对象/步骤\nSQLite Recipe.steps 读取步骤文本"]
+        DirectNavigation -- 否 --> SkipHybrid["偏好更新 / 闲聊 / 无状态导航\n跳过实际 Hybrid 检索"]
+        CheckpointNavigation --> Judge
+        SkipHybrid --> Judge
+        NeedRetrieval -- 是 --> Entity["菜名/设备实体解析"]
         Entity --> Exact{"别名/名称精确匹配?"}
         Exact -- 是 --> Filter["按 recipe_id 过滤"]
         Exact -- 否 --> HITL{"相似候选需要人工确认?"}
@@ -55,23 +61,24 @@ flowchart TB
         HITL -- 否 --> Hybrid
         Filter --> Hybrid["Hybrid 检索\nQdrant dense + sparse\n本地 BM25 + RRF"]
         Hybrid --> Rerank["Rerank 重排"]
-        Rerank --> Judge["Evidence Judge\nrelevant / sufficient / confidence"]
+        Rerank --> Evidence["回答证据 RetrievalHit.text\n优先来自 Qdrant payload.text\n本地 BM25 兜底时来自 SQLite chunks.text"]
+        Evidence --> Judge["Evidence Judge\nrelevant / sufficient / confidence"]
         Judge --> Retry{"不相关 / 不充分 / < 0.55\n且未重搜?"}
         Retry -- 是 --> RetryRewrite["LLM 重写检索 Query\n最多重搜一次"]
         RetryRewrite --> Hybrid
-        Retry -- 否 --> State["更新 CookingState\n仅流程相关 action"]
+        Retry -- 否 --> State["按 intent 同步 CookingState\n流程导航必更新；菜谱/步骤命中也可能同步"]
         State --> Checkpoint
         State --> Result["capture_action_result\n保留本 action 的证据、引用、Judge"]
         Result --> More{"还有下一个 action?"}
         More -- 是 --> Action
-        More -- 否 --> Answer["LLM 汇总回答\nPDF 引用 + 证据判断说明"]
+        More -- 否 --> Answer["汇总最终回答\n普通 RAG 使用 RetrievalHit.text\n流程导航使用 checkpoint + SQLite 步骤\nPDF 引用 + 证据判断说明"]
         Answer --> Trace["persist_trace + CLI RAG Turn Trace"]
         Trace --> TraceDB
     end
 
         Facts --> Exact
-        Facts --> Hybrid
-        Index --> Hybrid
+        Facts -->|SQLite chunks 本地 BM25 兜底| Hybrid
+        Index -->|向量、BM25 sparse 与 payload.text| Hybrid
     Checkpoint --> Load
     Checkpoint --> State
 ```
@@ -896,7 +903,7 @@ build/review/low_confidence_recipes.md
 3. 单意图设计无法处理一句话多个诉求。
    - 解决：改为 LLM 一次输出有序 IntentPlan.actions，按语义依赖逐项执行，最后合并回答；prepare_action 负责装载当前 action，capture_action_result 决定继续下一个 action 还是最终回答。
 4. 多个 action 可能污染做菜步骤状态。
-   - 解决：明确只有 cooking_navigation 会更新 CookingState；推荐、偏好更新、知识问答不会推进或覆盖当前步骤。
+   - 解决：明确只有 cooking_navigation、cooking_start、recipe_lookup、命中步骤的 field_lookup 会更新 CookingState；推荐、偏好更新、知识问答不会推进或覆盖当前步骤。
 5. 长期记忆同一类口味可能有多种表达，容易冗余。
    - 解决：大模型提取按语义归并的 canonical 和原始文本，只在 prompt 中注入当前有效偏好与忌口的 canonical 内容。
 6. 回答速度与性能。
