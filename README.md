@@ -899,7 +899,7 @@ build/review/low_confidence_recipes.md
 1. 每一步一个 chunk，大模型整合时容易打乱顺序、不知道“下一步”是什么。
    - 解决：在 metadata 中加入总步数、当前编号和下一步的编号。
 2. 检索会混入其他菜。
-   - 解决：菜名或别名精确命中后，以 recipe_id 限制后续检索范围，包括本地 BM25。
+   - 解决：菜名或别名精确命中后，以 recipe_id 限制后续检索范围，包括本地 BM25。**注：Reranker本身就能解决一部分这种情况，但是还不够，搜一种菜还有可能出来另一种菜，原因可能是query太短。**
 3. 单意图设计无法处理一句话多个诉求。
    - 解决：改为 LLM 一次输出有序 IntentPlan.actions，按语义依赖逐项执行，最后合并回答；prepare_action 负责装载当前 action，capture_action_result 决定继续下一个 action 还是最终回答。
 4. 多个 action 可能污染做菜步骤状态。
