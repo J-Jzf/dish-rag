@@ -2,5 +2,46 @@
 {"query":"麻婆豆腐有哪些过敏原？","expected_recipe_ids":["002"],"expected_fields":["allergens"]}
 {"query":"不吃辣能做宫保鸡丁吗？不要省略我的限制。","expected_recipe_ids":["001"],"expected_fields":["substitutions","ingredients"]}
 {"query":"腌笃鲜要炖多久？","expected_recipe_ids":["029"],"expected_fields":["time","steps"]}
+{"query":"鱼香肉丝的详细做法是什么？","expected_recipe_ids":["003"],"expected_fields":["steps"]}
+{"query":"鱼香肉丝的鱼香汁要怎么调？","expected_recipe_ids":["003"],"expected_fields":["steps","ingredients"]}
+{"query":"鱼香肉丝里的猪肉可以换成什么？","expected_recipe_ids":["003"],"expected_fields":["substitutions"]}
+{"query":"酸菜鱼怎么做？","expected_recipe_ids":["008"],"expected_fields":["steps"]}
+{"query":"草鱼配四川酸菜做的那道菜需要哪些食材？","expected_recipe_ids":["008"],"expected_fields":["ingredients"]}
+{"query":"酸菜鱼的鱼片应该怎么处理？","expected_recipe_ids":["008"],"expected_fields":["steps"]}
+{"query":"油焖春笋的做法是什么？","expected_recipe_ids":["015"],"expected_fields":["steps"]}
+{"query":"春笋用酱油和冰糖焖的菜怎么做？","expected_recipe_ids":["015"],"expected_fields":["ingredients","steps"]}
+{"query":"油焖春笋大概需要多长时间？","expected_recipe_ids":["015"],"expected_fields":["time","steps"]}
+{"query":"咸肉、鲜五花肉和春笋一起炖的汤怎么做？","expected_recipe_ids":["029"],"expected_fields":["ingredients","steps"]}
+{"query":"腌笃鲜要炖多久？","expected_recipe_ids":["029"],"expected_fields":["time","steps"]}
+{"query":"佛跳墙的完整做法是什么？","expected_recipe_ids":["041"],"expected_fields":["steps"]}
+{"query":"海参、鲍鱼和干贝一起煨的闽菜要做多久？","expected_recipe_ids":["041"],"expected_fields":["ingredients","time","steps"]}
+{"query":"锅塌豆腐怎么做？","expected_recipe_ids":["058"],"expected_fields":["steps"]}
+{"query":"北豆腐蘸蛋液后煎烧的菜需要什么食材？","expected_recipe_ids":["058"],"expected_fields":["ingredients","steps"]}
+{"query":"豌豆黄怎么制作？","expected_recipe_ids":["076"],"expected_fields":["steps"]}
+{"query":"去皮豌豆加桂花做的北京甜品要煮多久？","expected_recipe_ids":["076"],"expected_fields":["ingredients","time","steps"]}
+{"query":"凉皮的做法是什么？","expected_recipe_ids":["093"],"expected_fields":["steps"]}
+{"query":"高筋面粉、黄瓜和芝麻酱做的陕西凉菜怎么做？","expected_recipe_ids":["093"],"expected_fields":["ingredients","steps"]}
+{"query":"Spaghetti Carbonara 怎么做？","expected_recipe_ids":["111"],"expected_fields":["steps"]}
+{"query":"蛋黄、奶酪和意式腌猪颊肉做的意大利面怎么做？","expected_recipe_ids":["111"],"expected_fields":["ingredients","steps"]}
+{"query":"油封鸭腿的做法是什么？","expected_recipe_ids":["129"],"expected_fields":["steps"]}
+{"query":"Duck Confit 油封鸭腿需要做多久？","expected_recipe_ids":["129"],"expected_fields":["time","steps"]}
+{"query":"牧场主烤猪肉塔可怎么做？","expected_recipe_ids":["148"],"expected_fields":["steps"]}
+{"query":"菠萝、猪肉和玉米饼做的墨西哥菜是什么做法？","expected_recipe_ids":["148"],"expected_fields":["ingredients","steps"]}
+{"query":"菠菜奶酪咖喱怎么做？","expected_recipe_ids":["166"],"expected_fields":["steps"]}
+{"query":"Palak Paneer 需要哪些食材？","expected_recipe_ids":["166"],"expected_fields":["ingredients"]}
+{"query":"日式炸猪排怎么做？","expected_recipe_ids":["184"],"expected_fields":["steps"]}
+{"query":"Tonkatsu 需要哪些食材和步骤？","expected_recipe_ids":["184"],"expected_fields":["ingredients","steps"]}
+{"query":"葡式蛋挞怎么做？","expected_recipe_ids":["203"],"expected_fields":["steps"]}
+{"query":"冷冻酥皮、蛋黄和淡奶油做的甜点要烤多久？","expected_recipe_ids":["203"],"expected_fields":["ingredients","time","steps"]}
+{"query":"日式麻薯怎么做？","expected_recipe_ids":["219"],"expected_fields":["steps"]}
+{"query":"糯米粉包红豆沙的日式甜品怎么制作？","expected_recipe_ids":["219"],"expected_fields":["ingredients","steps"]}
+{"query":"杨枝甘露怎么做？","expected_recipe_ids":["224"],"expected_fields":["steps"]}
+{"query":"芒果、西柚、西米和椰浆做的甜品是什么做法？","expected_recipe_ids":["224"],"expected_fields":["ingredients","steps"]}
+{"query":"双皮奶怎么做？","expected_recipe_ids":["225"],"expected_fields":["steps"]}
+{"query":"牛奶和蛋清蒸出来的粤式甜品要蒸多久？","expected_recipe_ids":["225"],"expected_fields":["ingredients","time","steps"]}
+{"query":"红豆沙怎么煮？","expected_recipe_ids":["227"],"expected_fields":["steps"]}
+{"query":"红小豆和陈皮煮成的甜品需要多久？","expected_recipe_ids":["227"],"expected_fields":["ingredients","time","steps"]}
+{"query":"蒸水蛋怎么做才嫩？","expected_recipe_ids":["229"],"expected_fields":["steps"]}
+{"query":"鸡蛋加温水蒸十分钟左右的家常菜怎么做？","expected_recipe_ids":["229"],"expected_fields":["ingredients","time","steps"]}
 {"query":"下一步怎么做？","expected_intent":"cooking_navigation"}
 {"query":"教我做火星牛肉","expected_intent":"unknown_recipe_hitl"}
