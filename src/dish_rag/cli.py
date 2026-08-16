@@ -6,10 +6,35 @@ import json
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 app = typer.Typer(help="菜谱 Agentic RAG CLI") # 创建一个命令行应用对象。
 # help 是这个命令行工具的说明文字，运行python main.py --help命令时会显示。
 console = Console() # 创建一个 Rich 的终端输出对象，用来更漂亮地打印内容，比如彩色表格、面板、格式化文本。比普通 print() 更强。
+
+
+def render_retrieval_failures(failures: list[dict[str, object]], limit: int) -> Table:
+    """将 Recall@K 未命中的检索样例渲染为终端表格。"""
+
+    table = Table(title=f"Retrieval Failures (FAIL@{limit})", show_lines=True)
+    table.add_column("Query", overflow="fold")
+    table.add_column("Expected Recipe IDs")
+    table.add_column(f"Actual Top-{limit}", overflow="fold")
+    table.add_column("Expected Rank")
+    for failure in failures:
+        actual_top_k = failure["actual_top_k"]
+        actual_text = "\n".join(
+            f"{hit['recipe_id']} {hit['recipe_name']} ({hit['score']:.3f})"
+            for hit in actual_top_k
+        ) or "无命中"
+        rank = failure["rank"]
+        table.add_row(
+            str(failure["query"]),
+            ", ".join(failure["expected_recipe_ids"]),
+            actual_text,
+            str(rank) if rank is not None else "未命中",
+        )
+    return table
 
 
 @app.command() # 装饰器 把下面这个函数注册成一个命令行命令。使得可以python main.py ingest
@@ -82,7 +107,7 @@ def chat(
 @app.command()
 def eval_retrieval(
     eval_file: Path = Path("configs/eval_queries.jsonl"),
-    limit: int = 8,
+    limit: int = 5,
 ) -> None:
     """运行离线检索评测指标。"""
 
@@ -93,8 +118,10 @@ def eval_retrieval(
     settings = get_settings(Path.cwd())
     store = make_store(settings)
     retriever = make_retriever(settings, store)
-    metrics = run_retrieval_eval(retriever, eval_file, limit=limit)
-    console.print(metrics)
+    report = run_retrieval_eval(retriever, eval_file, limit=limit)
+    console.print({key: value for key, value in report.items() if key != "failures"})
+    if report["failures"]:
+        console.print(render_retrieval_failures(report["failures"], limit))
 
 
 @app.command()

@@ -1,7 +1,14 @@
-import json
-
 from dish_rag.agent.nodes import AgentNodes, _distinct_recipe_hits, route_after_action
-from dish_rag.models import CookingState, Intent, IntentAction, IntentPlan, RetrievalHit, TurnTrace
+from dish_rag.models import (
+    CookingState,
+    Intent,
+    IntentAction,
+    IntentPlan,
+    RetrievalHit,
+    TurnTrace,
+    UserMemoryItem,
+    UserMemorySnapshot,
+)
 
 
 def test_intent_plan_keeps_llm_dependency_order():
@@ -53,10 +60,16 @@ def test_intent_action_defaults_recommendation_count_to_five():
 
 class _MemoryStore:
     def __init__(self):
-        self.saved = []
+        self.operations = []
 
-    def save_memory(self, user_id, key, value):
-        self.saved.append((user_id, key, value))
+    def apply_memory_operations(self, user_id, operations):
+        self.operations.append((user_id, operations))
+        return UserMemorySnapshot(
+            restrictions=[
+                UserMemoryItem(canonical=operation.canonical, phrases=[operation.phrase])
+                for operation in operations
+            ]
+        )
 
 
 class _IntentPromptChat:
@@ -76,32 +89,24 @@ class _IntentPromptChat:
         }
 
 
-def test_intent_prompt_only_receives_preserved_constraints_from_memory():
+def test_intent_prompt_only_receives_active_structured_memory():
     chat = _IntentPromptChat()
     nodes = AgentNodes(chat=chat, retriever=None, store=None)
-    memory = {
-        "preference_latest": json.dumps(
-            {
-                "raw_query": "sensitive original query",
-                "completed_query": "sensitive completed query",
-                "preserved_constraints": ["no peanuts", "low spice"],
-            }
-        )
-    }
 
     nodes.classify_intent(
         {
             "user_query": "recommend protein meals",
             "cooking_state": CookingState(),
-            "memory": memory,
+            "user_memory": UserMemorySnapshot(
+                preferences=[UserMemoryItem(canonical="low spice")],
+                restrictions=[UserMemoryItem(canonical="no peanuts")],
+            ),
             "trace": TurnTrace(raw_query="recommend protein meals"),
         }
     )
 
     assert "no peanuts" in chat.user_prompt
     assert "low spice" in chat.user_prompt
-    assert "sensitive original query" not in chat.user_prompt
-    assert "sensitive completed query" not in chat.user_prompt
 
 
 def test_preference_action_updates_in_turn_memory_before_next_recommendation_action():
@@ -139,8 +144,9 @@ def test_preference_action_updates_in_turn_memory_before_next_recommendation_act
     completed_state = nodes.capture_action_result(preference_state)
     recommendation_state = nodes.prepare_action(completed_state)
 
-    assert store.saved[0][0:2] == ("user-001", "preference_latest")
-    assert "不吃花生" in recommendation_state["memory"]["preference_latest"]
+    assert store.operations[0][0] == "user-001"
+    assert store.operations[0][1][0].canonical == "不吃花生"
+    assert recommendation_state["user_memory"].restrictions[0].canonical == "不吃花生"
     assert recommendation_state["query_rewrite"].intent == Intent.RECOMMENDATION
     assert recommendation_state["query_rewrite"].recommendation_count == 3
     assert route_after_action(completed_state) == "prepare_action"
