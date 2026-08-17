@@ -923,6 +923,10 @@ kitchen-002：麻婆豆腐，当前第 1 步
 }
 ```
 
+只有 recipe_lookup 和 field_lookup 的重写后 Query embedding会在缓存未命中且检索结果非空时写入 dish_recipes_semantic_cache；写入的是 Query 向量和缓存条件，不是最终回答。
+
+对应的 RetrievalHit 检索结果保存在 SQLite 的 semantic_cache_entries。最终 LLM 回答、Evidence Judge 和 trace 不会写入这个 Qdrant collection。
+
 ## 可观测性
 
 每轮 trace 包含：
