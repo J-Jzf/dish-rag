@@ -44,6 +44,9 @@ def run_ingest(settings: Settings, index_qdrant: bool = True) -> dict[str, Path 
     if index_qdrant and settings.embedding_model_id:
         _index_qdrant(settings, chunks)
 
+    # 菜谱事实或主索引重建后，让旧版本的语义缓存自然失效。
+    store.bump_knowledge_base_version()
+
     return {
         "pages": len(pages),
         "recipes": len(recipes),

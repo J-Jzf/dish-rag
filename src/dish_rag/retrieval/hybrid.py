@@ -47,12 +47,13 @@ class HybridRetriever:
         query: str,
         limit: int = 8,
         filters: dict[str, object] | None = None,
+        dense_vector: list[float] | None = None,
     ) -> list[RetrievalHit]:
         """执行混合检索，并对融合后的候选（去重后）进行 rerank。"""
 
         qdrant_hits: list[RetrievalHit] = [] # 先准备空的 Qdrant 命中列表
         try:
-            dense = self.embeddings.embed_query(query)
+            dense = dense_vector or self.embeddings.embed_query(query)
             sparse = self.sparse_encoder.encode_query(query)
             qdrant_hits = self.qdrant.hybrid_search(dense, sparse, limit=limit, filters=filters) # 不用显式传入 Qdrant 中 chunk 的 embedding。因为 chunk 的 embedding 已经在 ingest 阶段写进 Qdrant 了。
         except Exception:

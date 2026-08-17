@@ -125,6 +125,27 @@ def eval_retrieval(
 
 
 @app.command()
+def eval_cache(
+    eval_file: Path = Path("configs/eval_cache_pairs.jsonl"),
+    limit: int = 5,
+) -> None:
+    """评测语义缓存对成对同义 Query 的命中、正确复用和耗时节省。"""
+
+    from dish_rag.config import get_settings
+    from dish_rag.eval.cache import run_cache_eval
+    from dish_rag.factory import make_retriever, make_semantic_cache, make_store
+
+    settings = get_settings(Path.cwd())
+    store = make_store(settings)
+    retriever = make_retriever(settings, store)
+    cache = make_semantic_cache(settings, store, retriever)
+    report = run_cache_eval(retriever, cache, eval_file, limit=limit)
+    console.print({key: value for key, value in report.items() if key != "failures"})
+    if report["failures"]:
+        console.print_json(json.dumps(report["failures"], ensure_ascii=False))
+
+
+@app.command()
 def qdrant_preview(
     limit: int = 2,
     with_vectors: Annotated[

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     qdrant_api_key: str = Field(default="", alias="QDRANT_API_KEY")
     qdrant_collection: str = Field(default="dish_recipes", alias="QDRANT_COLLECTION")
     qdrant_path: Path = Field(default=Path("var/qdrant"), alias="QDRANT_PATH")
+    semantic_cache_threshold: float = Field(default=0.85, alias="SEMANTIC_CACHE_THRESHOLD")
 
     # SQLite 保存菜谱原始事实和 LangGraph checkpoint。
     sqlite_path: Path = Field(default=Path("var/dish_rag.sqlite3"), alias="SQLITE_PATH")

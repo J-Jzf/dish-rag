@@ -6,7 +6,8 @@ from dish_rag.config import Settings
 from dish_rag.llm.opai import ChatClient, EmbeddingClient, RerankClient, SparseBM25Encoder
 from dish_rag.retrieval.hybrid import HybridRetriever
 from dish_rag.retrieval.name_index import RecipeNameIndex
-from dish_rag.storage.qdrant_store import QdrantRecipeIndex
+from dish_rag.retrieval.semantic_cache import SemanticCache
+from dish_rag.storage.qdrant_store import QdrantRecipeIndex, QdrantSemanticCacheIndex
 from dish_rag.storage.sqlite_store import SQLiteStore
 
 
@@ -44,11 +45,33 @@ def make_retriever(settings: Settings, store: SQLiteStore) -> HybridRetriever:
     )
 
 
+def make_semantic_cache(
+    settings: Settings,
+    store: SQLiteStore,
+    retriever: HybridRetriever,
+) -> SemanticCache:
+    """创建与菜谱主索引隔离、但复用 embedding 的语义缓存。"""
+
+    return SemanticCache(
+        store=store,
+        index=QdrantSemanticCacheIndex(
+            settings.qdrant_url,
+            settings.qdrant_api_key,
+            f"{settings.qdrant_collection}_semantic_cache",
+            settings.qdrant_path,
+            client=retriever.qdrant.client,
+        ),
+        embeddings=retriever.embeddings,
+        threshold=settings.semantic_cache_threshold,
+    )
+
+
 def make_graph(settings: Settings):
     """创建已经编译好的 LangGraph 应用。"""
 
     store = make_store(settings)
     retriever = make_retriever(settings, store)
     chat = ChatClient(settings.llm_model_id, settings.llm_api_key, settings.llm_base_url)
-    nodes = AgentNodes(chat, retriever, store)
+    semantic_cache = make_semantic_cache(settings, store, retriever)
+    nodes = AgentNodes(chat, retriever, store, semantic_cache=semantic_cache)
     return build_graph(nodes, settings.langgraph_checkpoint_db)

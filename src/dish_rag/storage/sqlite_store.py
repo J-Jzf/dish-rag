@@ -94,6 +94,29 @@ class SQLiteStore:
                     created_at text default current_timestamp,
                     payload_json text not null
                 );
+
+                create table if not exists system_metadata (
+                    metadata_key text primary key,
+                    metadata_value text not null
+                );
+
+                insert or ignore into system_metadata(metadata_key, metadata_value)
+                values ('knowledge_base_version', '0');
+
+                create table if not exists semantic_cache_entries (
+                    cache_id text primary key,
+                    cache_scope text not null,
+                    knowledge_base_version text not null,
+                    action_type text not null,
+                    recipe_id_filter text not null,
+                    memory_fingerprint text not null,
+                    result_limit integer not null,
+                    query_text text not null,
+                    hits_json text not null,
+                    created_at text default current_timestamp,
+                    last_accessed_at text default current_timestamp,
+                    hit_count integer not null default 0
+                );
                 """
             )
 
@@ -306,6 +329,105 @@ class SQLiteStore:
                 "insert into turn_traces(thread_id, payload_json) values (?, ?)",
                 (thread_id, json.dumps(payload, ensure_ascii=False)),
             )
+
+    def knowledge_base_version(self) -> str:
+        """返回当前结构化事实/索引构建版本，用于失效旧语义缓存。"""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                "select metadata_value from system_metadata where metadata_key = 'knowledge_base_version'"
+            ).fetchone()
+        return row["metadata_value"] if row else "0"
+
+    def bump_knowledge_base_version(self) -> str:
+        """知识库重建完成后递增版本，使旧缓存不再参与命中。"""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                "select metadata_value from system_metadata where metadata_key = 'knowledge_base_version'"
+            ).fetchone()
+            previous = int(row["metadata_value"]) if row else 0
+            version = str(previous + 1)
+            connection.execute(
+                """insert into system_metadata(metadata_key, metadata_value) values (?, ?)
+                   on conflict(metadata_key) do update set metadata_value = excluded.metadata_value""",
+                ("knowledge_base_version", version),
+            )
+        return version
+
+    def save_semantic_cache_entry(
+        self,
+        cache_id: str,
+        *,
+        cache_scope: str,
+        knowledge_base_version: str,
+        action_type: str,
+        recipe_id_filter: str,
+        memory_fingerprint: str,
+        result_limit: int,
+        query_text: str,
+        hits: list[dict[str, Any]],
+    ) -> None:
+        """持久化语义缓存元数据及可复用的 RetrievalHit 列表。"""
+
+        with self.connect() as connection:
+            connection.execute(
+                """insert into semantic_cache_entries(
+                    cache_id, cache_scope, knowledge_base_version, action_type,
+                    recipe_id_filter, memory_fingerprint, result_limit, query_text, hits_json
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                on conflict(cache_id) do update set
+                    hits_json=excluded.hits_json,
+                    last_accessed_at=current_timestamp""",
+                (
+                    cache_id,
+                    cache_scope,
+                    knowledge_base_version,
+                    action_type,
+                    recipe_id_filter,
+                    memory_fingerprint,
+                    result_limit,
+                    query_text,
+                    json.dumps(hits, ensure_ascii=False),
+                ),
+            )
+
+    def load_semantic_cache_entry(
+        self,
+        cache_id: str,
+        *,
+        cache_scope: str,
+        knowledge_base_version: str,
+        action_type: str,
+        recipe_id_filter: str,
+        memory_fingerprint: str,
+        result_limit: int,
+    ) -> list[dict[str, Any]] | None:
+        """只有元数据完全一致时才读取缓存结果，避免向量近似命中越界复用。"""
+
+        with self.connect() as connection:
+            row = connection.execute(
+                """select hits_json from semantic_cache_entries where cache_id = ?
+                   and cache_scope = ? and knowledge_base_version = ? and action_type = ?
+                   and recipe_id_filter = ? and memory_fingerprint = ? and result_limit = ?""",
+                (
+                    cache_id,
+                    cache_scope,
+                    knowledge_base_version,
+                    action_type,
+                    recipe_id_filter,
+                    memory_fingerprint,
+                    result_limit,
+                ),
+            ).fetchone()
+            if row:
+                connection.execute(
+                    """update semantic_cache_entries
+                       set last_accessed_at=current_timestamp, hit_count=hit_count + 1
+                       where cache_id = ?""",
+                    (cache_id,),
+                )
+        return json.loads(row["hits_json"]) if row else None
 
 
 def normalize_name(value: str) -> str:

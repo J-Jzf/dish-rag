@@ -153,7 +153,7 @@ class RetrievalHit(BaseModel):
     page: int
     step_no: int | None = None
     score: float
-    source: Literal["exact", "qdrant_dense", "qdrant_sparse", "bm25", "fusion", "rerank"]
+    source: Literal["exact", "qdrant_dense", "qdrant_sparse", "bm25", "fusion", "rerank", "semantic_cache"]
     filters: dict[str, Any] = Field(default_factory=dict)
 
 

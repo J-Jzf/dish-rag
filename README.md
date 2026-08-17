@@ -10,6 +10,7 @@
 - SQLite 作为事实源，保存菜谱原始事实、chunks、别名、结构化长期记忆和 `turn_traces`；Qdrant 保存 dense vector + BM25 sparse vector 搜索索引。
 - 菜名精确匹配、别名匹配后按 `recipe_id` 过滤检索；菜名不存在但存在相似候选时进入 Human-in-the-loop 确认，不自动替换相似菜。
 - 使用 dense 语义检索、Qdrant BM25 sparse 检索、本地 BM25、RRF 融合和 rerank 重排构成 hybrid 检索。
+- `recipe_lookup` 与 `field_lookup` 在 Hybrid 前支持语义缓存：SQLite 保存缓存元数据和 `RetrievalHit` 结果，独立 Qdrant collection 保存重写 Query 向量；缓存命中跳过 Hybrid/rerank，但仍经过 Evidence Judge、状态更新和最终回答。
 - LangGraph 编排上下文补全、多意图规划、Query 重写、检索、Evidence Judge、状态更新、回答和 Trace 持久化；一轮可按语义依赖顺序执行多个 intent action，再汇总回答。
 - 支持菜谱查询、字段查询、开始做菜、步骤导航、推荐、偏好更新、闲聊、拒答和澄清等 intent；推荐默认返回 5 道，用户指定数量时按指定数量处理。
 - Checkpoint 按 `thread_id` 持久化当前菜谱、步骤、HITL 暂停位置、多意图 action 下标和重搜状态，支持“下一步”“重复”“回到上一步”等上下文表达。
@@ -58,10 +59,18 @@ flowchart TB
         Exact -- 否 --> HITL{"相似候选需要人工确认?"}
         HITL -- 是 --> Pause["LangGraph interrupt / HITL"]
         Pause --> Checkpoint
-        HITL -- 否 --> Hybrid
-        Filter --> Hybrid["Hybrid 检索\nQdrant dense + sparse\n本地 BM25 + RRF"]
+        HITL -- 否 --> CacheEligible{"语义缓存白名单?\nrecipe_lookup /\n field_lookup"}
+        Filter --> CacheEligible
+        CacheEligible -- 是 --> CacheLookup["语义缓存查询\n重写 Query dense vector\n阈值 >= 0.85"]
+        CacheLookup --> CacheHit{"缓存命中?"}
+        CacheHit -- 是 --> Evidence
+        CacheHit -- 否 --> Hybrid
+        CacheEligible -- 否 --> Hybrid["Hybrid 检索\nQdrant dense + sparse\n本地 BM25 + RRF"]
         Hybrid --> Rerank["Rerank 重排"]
-        Rerank --> Evidence["回答证据 RetrievalHit.text\n优先来自 Qdrant payload.text\n本地 BM25 兜底时来自 \nSQLite chunks.text"]
+        Rerank --> CacheWrite{"写入语义缓存?\n仅白名单 action \n且结果非空"}
+        CacheWrite -- 是 --> CacheStore["写入缓存结果"]
+        CacheWrite -- 否 --> Evidence["回答证据 \nRetrievalHit.text\n优先来自 \nQdrant payload.text\n本地 BM25 \n兜底时来自 \nSQLite chunks.text"]
+        CacheStore --> Evidence
         Evidence --> Judge["Evidence Judge\nrelevant / sufficient / confidence"]
         Judge --> Retry{"不相关 / 不充分 / < 0.55\n且未重搜?"}
         Retry -- 是 --> RetryRewrite["LLM 重写检索 Query\n最多重搜一次"]
@@ -79,6 +88,12 @@ flowchart TB
         Facts --> Exact
         Facts -->|SQLite chunks 本地 BM25 兜底| Hybrid
         Index -->|向量、BM25 与 payload.text| Hybrid
+    SemanticCacheIndex["Qdrant \ndish_recipes_semantic_cache\n重写 Query dense vector \n+ 缓存条件"]
+    SemanticCacheDB["SQLite \nsemantic_cache_entries\n缓存 metadata + \nRetrievalHit 结果"]
+    CacheLookup --> SemanticCacheIndex
+    CacheLookup --> SemanticCacheDB
+    CacheStore --> SemanticCacheIndex
+    CacheStore --> SemanticCacheDB
     Checkpoint --> Load
     Checkpoint --> State
 ```
@@ -91,7 +106,8 @@ dish-rag/
   requirements.txt                   # 传统依赖清单
   pytest.ini                         # 测试配置
   data/菜谱_230道.pdf                 # 原始 PDF
-  configs/eval_queries.jsonl          # 离线检索评测样例
+  configs/eval_queries.jsonl          # 原始 Hybrid 离线检索评测样例
+  configs/eval_cache_pairs.jsonl      # 语义缓存同义 Query 对评测样例
   src/dish_rag/
     config.py                         # .env 和路径配置
     models.py                         # Recipe、Chunk、Trace、CookingState 等模型
@@ -119,6 +135,7 @@ dish-rag/
       nodes.py                        # 图节点
       graph.py                        # 图编译和 checkpoint
     eval/offline.py                   # recall@k、precision@k
+    eval/cache.py                     # 语义缓存命中、复用正确性与耗时评测
   tests/                              # parser/safety/chunker 单测
 ```
 
@@ -140,6 +157,7 @@ QDRANT_URL=
 QDRANT_API_KEY=
 QDRANT_COLLECTION=dish_recipes
 QDRANT_PATH=var/qdrant
+SEMANTIC_CACHE_THRESHOLD=0.85
 SQLITE_PATH=var/dish_rag.sqlite3
 LANGGRAPH_CHECKPOINT_DB=var/langgraph_checkpoints.sqlite3
 ```
@@ -255,6 +273,12 @@ python main.py chat "我要做宫保鸡丁，怎么做？" --thread-id kitchen-0
 python main.py eval-retrieval
 ```
 
+语义缓存评测（100 组同义 Query 对，共 200 句话）：
+
+```bash
+python main.py eval-cache
+```
+
 查看本地 Qdrant collection 和前几条 point：
 
 ```bash
@@ -327,7 +351,9 @@ python main.py ingest
 概括流程：先识别pdf，按页得到文本。然后再合并页码标记+页中内容，按菜谱结构（菜名）划分出每一道菜，再按每一道菜的格式（固定字段正则匹配）解析成 Recipe，如果recipe的置信度（完整度）低于阈值，就会进入人工核查（以便补齐菜谱稳定的结构）；最后按每道菜的结构字段和步骤切chunk。（因为依赖菜谱的稳定结构，所以置信度判断还是重要的。）
 
 最终：
-- Qdrant 里只有 chunk 向量索引和 payload（向量附带的数据包--业务信息），每个点都是一个 RecipeChunk。--索引源，对每一个 chunk 做 embedding 写入 Qdrant。
+- Qdrant 有两个 collection：
+  - `dish_recipes` 是菜谱 chunk 向量索引和 payload（向量附带的业务信息），每个 point 对应一个 `RecipeChunk`；对每个 chunk 做 dense embedding 和 BM25 sparse vector 后写入。
+  - `dish_recipes_semantic_cache` 是独立的语义缓存索引；每个 point 对应一条已缓存的重写 Query，只保存该 Query 的 dense vector，以及缓存 ID、action、`recipe_id` 过滤、知识库版本、记忆指纹和 Top-K 等 payload，不保存菜谱正文，也不参与 BM25/RRF 检索。
   - 因为用户问题通常是局部的（有哪些过敏源、要煮多久），如果存整道菜，向量会把原材料、步骤、过敏原、保存方式全混在一起，检索粒度太粗。
   - 每个 Qdrant chunk 里会带菜谱级 metadata（菜肴名、种类、tags等）所以虽然 Qdrant 点是 chunk 级别，仍然知道它属于哪道菜。
 - SQLite 里保存得更完整。--事实源。作为事实源备份，兜底、溯源时用。普通查询时用 Qdrant payload.text 形成 RetrievalHit.text，LLM基于此回答；目前只有“xxx 接下来/下一步”这类烹饪导航，根据命中 step_no 去 SQLite Recipe.steps 取当前/下一步。
@@ -336,8 +362,12 @@ python main.py ingest
   - aliases 表（保存菜名和别名，用于精确匹配）
   - long_term_memory 表
     - user_preferences 表（结构化普通偏好，语义归并后保留最近 10 个不同概念）
-    - user_restrictions 表（结构化忌口/过敏，默认只增不减）
+  - user_restrictions 表（结构化忌口/过敏，默认只增不减）
   - turn_traces 表（每轮可观测 trace，即系统这一轮为什么这么回答的“流水账”）
+  - system_metadata 表
+    - 保存 `knowledge_base_version`。它是本项目的知识库构建版本计数：每成功执行一次 `ingest`（导入并构建知识库），数值加一；语义缓存条目会记录写入时的数值，只有与当前数值相同才允许命中。因此重新入库后，即使旧缓存还留在数据库中，也不会被复用。
+  - semantic_cache_entries 表
+    - 保存语义缓存的元数据和完整 `RetrievalHit` 结果 JSON，包括缓存 ID、Query 文本、action、`recipe_id` 过滤、记忆指纹、知识库版本、Top-K、创建/访问时间和命中次数。
 
 ### chunk 的 text 和 metadata
 
@@ -475,6 +505,9 @@ start_trace
 用户原始 Query
 -> LLM 做意图识别、上下文补全、菜名实体解析
 -> LLM 做 Query 重写，并保留用户限制
+-> 若 action 为 recipe_lookup 或 field_lookup，先以 rewritten_query 检查语义缓存
+   -> 缓存命中：复用 RetrievalHit，跳过 Hybrid/rerank
+   -> 缓存未命中：继续 Hybrid，并写入缓存供后续同义 Query 使用
 -> 对 rewritten_query 做 embedding，得到 query dense vector
 -> 用 FastEmbed BM25 把 rewritten_query 编成 query sparse vector
 -> Qdrant 同时做 dense 向量相似度检索和 BM25 稀疏检索
@@ -858,6 +891,38 @@ kitchen-002：麻婆豆腐，当前第 1 步
 - SQLite 回取完整事实目前主要用于“下一步/上一步”等烹饪导航：根据命中的 step_no 从完整 Recipe.steps 读取步骤。
   - SQLite 仍可称为“事实源”，因为它保存的是入库后的权威、完整、可重建数据：结构化菜谱、原始 chunk、别名、页码等；Qdrant 的向量和 payload 是从 SQLite 派生出的可重建搜索索引副本。“事实源”不等于“每次回答都必须直接从它取文本”。当前普通回答直接使用 Qdrant 的 chunk 文本副本，是性能和实现简化上的选择。
 
+## 语义缓存
+
+语义缓存是 Hybrid 检索前的性能层，只对 `recipe_lookup`、`field_lookup` 生效；`recommendation`、做菜导航、偏好更新、闲聊、HITL 等 action 均保持原有路径，不读取或写入语义缓存。
+
+### 语义缓存的实现逻辑
+
+1. `rewrite_query` 生成 `rewritten_query` 后，`retrieve` 先判断当前 action 是否属于缓存白名单。
+2. 白名单 action 使用现有 embedding 模型将 `rewritten_query` 转为 dense vector，到独立 Qdrant collection `dish_recipes_semantic_cache` 中按默认相似度阈值 `0.85` 查找相近 Query。
+3. 除 Query 语义相近外，以下上下文必须精确一致：action、`recipe_id` 过滤、知识库版本、用户有效偏好/忌口的 canonical 内容、Top-K；否则视为缓存未命中。
+4. 缓存命中时，根据缓存 ID 从 SQLite `semantic_cache_entries` 取回已保存的 `RetrievalHit` 列表，并将来源标记为 `semantic_cache`；此时跳过 Hybrid 检索与 rerank。
+5. 缓存未命中时，仍执行原有 Hybrid 检索与 rerank，并将非空结果写入 SQLite 和语义缓存 collection，供后续相近 Query 使用。
+
+它不是每个 `thread` 独立的缓存。当前缓存按 action、Query 语义、`recipe_id` 过滤、知识库版本、用户有效偏好/忌口 canonical 内容、Top-K 隔离；不同 `thread` 若这些条件相同，可以复用同一条缓存。
+
+缓存命中仅跳过检索流程，后续 Evidence Judge、至多一次证据不足重搜、CookingState 更新、checkpoint 持久化和最终回答生成仍然保留。
+
+目前的结果：
+
+```text
+{
+    'pairs': 100,
+    'cache_hit_rate': 0.36,
+    'correct_reuse_rate': 1.0,
+    'incorrect_reuse_rate': 0.0,
+    'baseline_failures': 0,
+    'hybrid_average_ms': 1262.2291955011315,
+    'cache_hit_average_ms': 33.39106388577622,
+    'time_saved_ms': 1228.8381316153552,
+    'time_saved_percent': 97.35459582104507
+}
+```
+
 ## 可观测性
 
 每轮 trace 包含：
@@ -883,6 +948,8 @@ CLI 会打印 trace，SQLite 的 `turn_traces` 表也会持久保存 JSON。
 - `precision_at_k`：前 k 命中里期望菜谱占比。
 
 当前以 `k=5` 评测纯 dense + BM25 + RRF + rerank 的基础召回，共 100 条测试样例，`Recall@5 = 0.80`。该评测直接衡量原始 Hybrid 检索，未经过菜名/别名精确匹配后的 `recipe_id` 过滤；完整聊天链路对明确菜名的问题会更稳，几乎达到 100%（只要输入中有菜名）。
+
+`configs/eval_cache_pairs.jsonl` 额外提供 100 组同义 Query 对（共 200 句话），由 `python main.py eval-cache` 评测。每组的 Query A 冷启动检索并写入隔离缓存，Query B 尝试复用；输出缓存命中率、正确/错误复用率、原始 Hybrid 平均耗时、缓存命中平均耗时和节省时间。缓存仅用于 `recipe_lookup`、`field_lookup`：其上下文必须同时匹配菜谱 `recipe_id` 过滤、知识库版本、用户有效偏好/忌口 canonical 内容、action 类型和 Top-K；菜谱重新入库后知识库版本递增，旧缓存不会再命中。
 
 后续可以继续扩展字段级命中率、约束保留率、HITL 触发准确率、烹饪状态转移准确率。
 
@@ -915,6 +982,8 @@ build/review/low_confidence_recipes.md
 8. 回答不能只看 embedding 相似度。
     - 解决：增加一个 LLM-as-JUDGE 节点，用于验证证据是否相关、充分、可信。
 9. 尝试过使用本地的 bge-m3 模型语义化向量**想做稳定的意图识别而非依赖在线 LLM 的调用和采样，但意图识别准确率反而从 100% 降低到 86%**，知识问答/流程查询/其他容易混淆、甚至上/下一步也会反，且速度也没变快。可能（猜测）的原因是向量太近、句子太短。
+10. 新增语义缓存后，本地嵌入式 Qdrant 报错“Storage folder ... is already accessed by another instance”。原因：主检索器和语义缓存索引分别对同一个 `var/qdrant` 创建了两个 `QdrantClient`；嵌入式 Qdrant 对同一存储目录使用独占锁，即使两个 client 在同一个 Python 进程中也不允许。
+    - 解决：语义缓存 collection 不再新建 client，而是复用主检索器已创建的同一个 `QdrantClient`；两个 collection 在同一个 client 中独立管理，因此仍保持主索引和缓存索引的数据隔离。
 
 ## 最有可能的问题（执行不符合预期）的地方
 

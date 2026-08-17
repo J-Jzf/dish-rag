@@ -25,6 +25,7 @@ from dish_rag.models import (
     UserMemorySnapshot,
 )
 from dish_rag.retrieval.hybrid import HybridRetriever
+from dish_rag.retrieval.semantic_cache import CACHEABLE_ACTION_TYPES, SemanticCache
 from dish_rag.safety import check_refusal, detect_constraint_loss, extract_user_constraints
 from dish_rag.storage.sqlite_store import SQLiteStore
 
@@ -32,12 +33,19 @@ from dish_rag.storage.sqlite_store import SQLiteStore
 class AgentNodes:
     """图节点及其共享依赖的容器。"""
 
-    def __init__(self, chat: ChatClient, retriever: HybridRetriever, store: SQLiteStore) -> None:
+    def __init__(
+        self,
+        chat: ChatClient,
+        retriever: HybridRetriever,
+        store: SQLiteStore,
+        semantic_cache: SemanticCache | None = None,
+    ) -> None:
         """绑定模型、检索器和存储依赖。"""
 
         self.chat = chat
         self.retriever = retriever
         self.store = store
+        self.semantic_cache = semantic_cache
 
     def start_trace(self, state: DishAgentState) -> DishAgentState:
         """初始化 trace，并加载当前用户长期记忆，记录本轮开始前的烹饪状态。"""
@@ -251,11 +259,12 @@ class AgentNodes:
         # 它本身不会暂停图执行。它只是让后续节点看到“没有 hits、trace 里有说明”，后续“answer()”根据状态返回输出的话术，**图的这一轮还是会继续走完**。
 
         if state.get("evidence_retry_count", 0) > 0 and state.get("selected_recipe_id"):
-            hits = self.retriever.retrieve(
+            hits, cache_hit = self._retrieve_for_action(
+                state,
                 rewrite.rewritten_query,
                 filters={"recipe_id": state["selected_recipe_id"]},
             )
-            trace = _update_trace(state["trace"], qdrant_hits=hits)
+            trace = _trace_retrieval_result(state["trace"], hits, cache_hit)
             return {**state, "hits": hits, "trace": trace}
 
         if _intent_value(rewrite.intent) == Intent.RECOMMENDATION.value:
@@ -271,8 +280,8 @@ class AgentNodes:
             exact = self.retriever.exact_recipe(entity) # 先查 SQLite aliases 做精确匹配。
             if exact:
                 filters = {"recipe_id": exact.recipe_id}
-                hits = self.retriever.retrieve(rewrite.rewritten_query, filters=filters) # 如果命中，就只在这道菜里 hybrid 检索
-                trace = _update_trace(state["trace"], qdrant_hits=hits)
+                hits, cache_hit = self._retrieve_for_action(state, rewrite.rewritten_query, filters=filters)
+                trace = _trace_retrieval_result(state["trace"], hits, cache_hit)
                 return {**state, "hits": hits, "trace": trace}
 
         # 第四步，如果有菜名但精确匹配失败
@@ -295,16 +304,17 @@ class AgentNodes:
         
         # 第五步，如果是 cooking_navigation 且 checkpoint 里有当前菜
         if _intent_value(rewrite.intent) == Intent.COOKING_NAVIGATION.value and active_recipe_id:
-            hits = self.retriever.retrieve(
+            hits, cache_hit = self._retrieve_for_action(
+                state,
                 rewrite.rewritten_query,
                 filters={"recipe_id": active_recipe_id},
             )
-            trace = _update_trace(state["trace"], qdrant_hits=hits)
+            trace = _trace_retrieval_result(state["trace"], hits, cache_hit)
             return {**state, "hits": hits, "trace": trace}
 
         # 最后普通情况，全库 hybrid 检索。
-        hits = self.retriever.retrieve(rewrite.rewritten_query)
-        trace = _update_trace(state["trace"], qdrant_hits=hits)
+        hits, cache_hit = self._retrieve_for_action(state, rewrite.rewritten_query)
+        trace = _trace_retrieval_result(state["trace"], hits, cache_hit)
         return {**state, "hits": hits, "trace": trace}
 
     def hitl_recipe_choice(self, state: DishAgentState) -> DishAgentState:
@@ -326,12 +336,63 @@ class AgentNodes:
         recipe_id = state.get("selected_recipe_id")
         if not recipe_id:
             return {**state, "hits": []}
-        hits = self.retriever.retrieve(
+        hits, cache_hit = self._retrieve_for_action(
+            state,
             state["query_rewrite"].rewritten_query,
             filters={"recipe_id": recipe_id},
         )
-        trace = _update_trace(state["trace"], qdrant_hits=hits)
+        trace = _trace_retrieval_result(state["trace"], hits, cache_hit)
         return {**state, "hits": hits, "trace": trace}
+
+    def _retrieve_for_action(
+        self,
+        state: DishAgentState,
+        query: str,
+        *,
+        limit: int = 8,
+        filters: dict[str, object] | None = None,
+    ) -> tuple[list[RetrievalHit], bool]:
+        """只为白名单 action 查询/写入语义缓存，其余保持原 Hybrid 行为。"""
+
+        action_type = _intent_value(state["query_rewrite"].intent)
+        if self.semantic_cache is None or action_type not in CACHEABLE_ACTION_TYPES:
+            return self.retriever.retrieve(query, limit=limit, filters=filters), False
+        user_memory = state.get("user_memory", UserMemorySnapshot())
+        try:
+            vector = self.semantic_cache.embed_query(query)
+            cached_hits = self.semantic_cache.lookup_embedding(
+                vector=vector,
+                action_type=action_type,
+                filters=filters,
+                user_memory=user_memory,
+                limit=limit,
+            )
+            if cached_hits is not None:
+                return cached_hits, True
+        except Exception:
+            # 缓存查询失败时退回原检索；缓存不是可用性的依赖。
+            return self.retriever.retrieve(query, limit=limit, filters=filters), False
+
+        hits = self.retriever.retrieve(
+            query,
+            limit=limit,
+            filters=filters,
+            dense_vector=vector,
+        )
+        try:
+            self.semantic_cache.store_embedding(
+                query=query,
+                vector=vector,
+                action_type=action_type,
+                filters=filters,
+                user_memory=user_memory,
+                limit=limit,
+                hits=hits,
+            )
+        except Exception:
+            # 写缓存失败不应重跑已完成的 Hybrid 检索。
+            pass
+        return hits, False
 
     def judge_evidence(self, state: DishAgentState) -> DishAgentState:
         """LangGraph 里的证据判断节点。判断检索证据是否足够回答。"""
@@ -1003,3 +1064,16 @@ def _update_trace(trace: TurnTrace, **updates: Any) -> TurnTrace:
     """返回一个已更新指定字段的新 trace。"""
 
     return trace.model_copy(update={key: value for key, value in updates.items() if value is not None})
+
+
+def _trace_retrieval_result(
+    trace: TurnTrace,
+    hits: list[RetrievalHit],
+    semantic_cache_hit: bool,
+) -> TurnTrace:
+    """记录原检索或语义缓存提供的证据，便于区分性能层命中。"""
+
+    notes = trace.notes
+    if semantic_cache_hit:
+        notes = [*notes, "语义缓存命中：复用检索结果，跳过 Hybrid 检索与 rerank。"]
+    return _update_trace(trace, qdrant_hits=hits, notes=notes)

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, TYPE_CHECKING
 
 from dish_rag.models import RecipeChunk, RetrievalHit
+
+if TYPE_CHECKING:
+    from dish_rag.retrieval.semantic_cache import SemanticCacheContext
 
 
 class QdrantRecipeIndex:
@@ -139,6 +142,93 @@ class QdrantRecipeIndex:
         return hits
 
 
+class QdrantSemanticCacheIndex:
+    """以独立 collection 保存可按语义相似度复用的 Query 向量。"""
+
+    def __init__(
+        self,
+        url: str,
+        api_key: str,
+        collection: str,
+        local_path: Path | None = None,
+        client: Any | None = None,
+    ) -> None:
+        self.collection = collection
+        if client is not None:
+            # 嵌入式 Qdrant 对同一路径只允许一个 client；语义缓存必须复用主索引 client。
+            self.client = client
+        elif url:
+            from qdrant_client import QdrantClient
+
+            self.client = QdrantClient(url=url, api_key=api_key or None)
+        else:
+            from qdrant_client import QdrantClient
+
+            assert local_path is not None
+            local_path.mkdir(parents=True, exist_ok=True)
+            self.client = QdrantClient(path=str(local_path))
+
+    def find(
+        self,
+        vector: list[float],
+        context: "SemanticCacheContext",
+        threshold: float,
+    ) -> str | None:
+        """返回元数据一致且余弦相似度达到阈值的缓存条目。"""
+
+        from qdrant_client import models
+
+        self._ensure_collection(len(vector))
+        response = self.client.query_points(
+            collection_name=self.collection,
+            query=vector,
+            using="dense",
+            query_filter=_semantic_cache_filter(context),
+            limit=1,
+            with_payload=True,
+        )
+        points = getattr(response, "points", response)
+        if not points or float(points[0].score or 0.0) < threshold:
+            return None
+        return str((points[0].payload or {}).get("cache_id") or "") or None
+
+    def upsert(
+        self,
+        cache_id: str,
+        vector: list[float],
+        context: "SemanticCacheContext",
+    ) -> None:
+        """写入 Query 向量及用于精确隔离的缓存上下文。"""
+
+        from qdrant_client import models
+
+        self._ensure_collection(len(vector))
+        self.client.upsert(
+            collection_name=self.collection,
+            points=[
+                models.PointStruct(
+                    id=_stable_point_id(cache_id),
+                    vector={"dense": vector},
+                    payload={"cache_id": cache_id, **_semantic_cache_payload(context)},
+                )
+            ],
+        )
+
+    def _ensure_collection(self, dense_size: int) -> None:
+        """按需创建缓存 collection，绝不影响菜谱主索引。"""
+
+        from qdrant_client import models
+
+        if self.client.collection_exists(self.collection):
+            return
+        self.client.create_collection(
+            collection_name=self.collection,
+            vectors_config={
+                "dense": models.VectorParams(size=dense_size, distance=models.Distance.COSINE)
+            },
+        )
+
+
 def _stable_point_id(chunk_id: str) -> int:
     """把 chunk id 转成稳定的无符号整数 point id。"""
 
@@ -184,3 +274,18 @@ def _build_filter(filters: dict[str, object]):
         if value not in (None, "")
     ]
     return models.Filter(must=conditions) if conditions else None
+
+
+def _semantic_cache_payload(context: "SemanticCacheContext") -> dict[str, object]:
+    return {
+        "cache_scope": context.cache_scope,
+        "knowledge_base_version": context.knowledge_base_version,
+        "action_type": context.action_type,
+        "recipe_id_filter": context.recipe_id_filter,
+        "memory_fingerprint": context.memory_fingerprint,
+        "result_limit": context.result_limit,
+    }
+
+
+def _semantic_cache_filter(context: "SemanticCacheContext"):
+    return _build_filter(_semantic_cache_payload(context))
