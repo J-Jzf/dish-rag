@@ -989,6 +989,72 @@ build/review/low_confidence_recipes.md
 10. 新增语义缓存后，本地嵌入式 Qdrant 报错“Storage folder ... is already accessed by another instance”。原因：主检索器和语义缓存索引分别对同一个 `var/qdrant` 创建了两个 `QdrantClient`；嵌入式 Qdrant 对同一存储目录使用独占锁，即使两个 client 在同一个 Python 进程中也不允许。
     - 解决：语义缓存 collection 不再新建 client，而是复用主检索器已创建的同一个 `QdrantClient`；两个 collection 在同一个 client 中独立管理，因此仍保持主索引和缓存索引的数据隔离。
 
+## 未来可做
+
+- vLLM 部署（应在 Linux/WSL2 的 NVIDIA GPU 环境运行；vLLM 不适合直接在原生 Windows Python 环境中部署），以便高并发服务。先用 pip install vllm 或 Docker 准备 vLLM 运行环境；分别启动生成模型、embedding 模型、rerank 模型的 vLLM server；修改 .env，把对应模型名、API Key、Base URL 指向这三个服务（三个服务会分别占用显存。vLLM 的 serve 提供 Chat、Embedding 和 Rerank 接口）。
+
+```bash
+pip install vllm
+
+# LLM：8000
+vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --host 0.0.0.0 --port 8000 --api-key local-key
+
+# Embedding：8001
+vllm serve BAAI/bge-m3 \
+  --task embed \
+  --host 0.0.0.0 --port 8001 --api-key local-key
+
+# Rerank：8002
+vllm serve BAAI/bge-reranker-v2-m3 \
+  --task score \
+  --host 0.0.0.0 --port 8002 --api-key local-key
+```
+
+或 Docker：
+
+```bash
+docker pull vllm/vllm-openai:latest
+
+# LLM
+docker run -d --gpus all --ipc=host --name dish-rag-llm \
+  -p 8000:8000 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm/vllm-openai:latest \
+  Qwen/Qwen2.5-7B-Instruct \
+  --host 0.0.0.0 --port 8000 --api-key local-key
+
+# Embedding
+docker run -d --gpus all --ipc=host --name dish-rag-embedding \
+  -p 8001:8001 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm/vllm-openai:latest \
+  BAAI/bge-m3 \
+  --task embed --host 0.0.0.0 --port 8001 --api-key local-key
+
+# Rerank
+docker run -d --gpus all --ipc=host --name dish-rag-rerank \
+  -p 8002:8002 \
+  -v ~/.cache/huggingface:/root/.cache/huggingface \
+  vllm/vllm-openai:latest \
+  BAAI/bge-reranker-v2-m3 \
+  --task score --host 0.0.0.0 --port 8002 --api-key local-key
+```
+
+```text
+LLM_MODEL_ID=<chat-model>
+LLM_API_KEY=local-key
+LLM_BASE_URL=http://127.0.0.1:8000/v1
+
+EMBEDDING_MODEL_ID=<embedding-model>
+EMBEDDING_API_KEY=local-key
+EMBEDDING_BASE_URL=http://127.0.0.1:8001/v1
+
+RERANK_MODEL_ID=<reranker-model>
+RERANK_API_KEY=local-key
+RERANK_BASE_URL=http://127.0.0.1:8002/v1/rerank
+```
+
 ## 最有可能的问题（执行不符合预期）的地方
 
 ### 多意图识别与执行顺序依赖一次 LLM 规划
