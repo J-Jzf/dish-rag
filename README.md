@@ -495,6 +495,8 @@ start_trace
 -> persist_trace
 ```
 
+当前是“图编排到 `retrieve` 节点时固定执行 RAG”，不是 LLM 自主从 search_recipes 之类的 Tool 列表中选择调用，没有工具注册表。但是“会不会编排到 `retrieve` 节点”就是由 LLM 判断每个 action 的 `needs_retrieval`，只有需要检索的 action 才会被编排进入 `retrieve` 节点。
+
 ### 用户链路 demo
 
 当前实现里有“用户 Query 改写后再 embedding/检索”，暂时没有实现“先让大模型生成假设答案，再对假设答案 embedding”的 HyDE 流程。
@@ -944,6 +946,15 @@ kitchen-002：麻婆豆腐，当前第 1 步
 
 CLI 会打印 trace，SQLite 的 `turn_traces` 表也会持久保存 JSON。
 
+### 最终结果如何验收
+
+要判断是否是正确回答，若回答错误，要判断是因为：
+- 正确 chunk 压根就没有；
+- 还是正确 chunk 没被找到；
+- 还是正确 chunk 被找到后融入回答被幻觉替代了。
+
+此时，可观测的trace就非常有用。
+
 ## 可信度与评测
 
 `configs/eval_queries.jsonl` 里放离线 query。`eval/offline.py` 当前计算：
@@ -988,10 +999,17 @@ build/review/low_confidence_recipes.md
 9. 尝试过使用本地的 bge-m3 模型语义化向量**想做稳定的意图识别而非依赖在线 LLM 的调用和采样，但意图识别准确率反而从 100% 降低到 86%**，知识问答/流程查询/其他容易混淆、甚至上/下一步也会反，且速度也没变快。可能（猜测）的原因是向量太近、句子太短。
 10. 新增语义缓存后，本地嵌入式 Qdrant 报错“Storage folder ... is already accessed by another instance”。原因：主检索器和语义缓存索引分别对同一个 `var/qdrant` 创建了两个 `QdrantClient`；嵌入式 Qdrant 对同一存储目录使用独占锁，即使两个 client 在同一个 Python 进程中也不允许。
     - 解决：语义缓存 collection 不再新建 client，而是复用主检索器已创建的同一个 `QdrantClient`；两个 collection 在同一个 client 中独立管理，因此仍保持主索引和缓存索引的数据隔离。
+11. 思考要不要变成“注册 tool 形式的 agentic rag”，思考结果是不要：
+    - 当前这种“LangGraph 固定节点编排”更好。因为核心链路有明确的可控顺序：意图识别 → action 编排 → 重写 → 缓存/检索 → Evidence Judge → 至多一次重搜 → 状态更新 → 回答。这样能稳定保证：
+      - cooking_navigation 才能更新 CookingState，不会被推荐或问答污染。
+      - 语义缓存、recipe_id 过滤、HITL、证据不足重搜不会被模型跳过。
+      - 每一步都能记录 trace、离线评测，结果更可复现。
+      - 检索、SQLite/Qdrant、checkpoint 都是内部基础设施，不适合让模型自由决定是否读写。
+      工具注册表更适合未来增加开放式外部能力，例如查实时天气、库存/冰箱 Text-to-SQL、下单、联网搜索。届时可以把这些作为受控工具加入，但不建议把当前核心 retrieve、状态写入等流程完全改成 LLM 自由 tool calling。
 
 ## 未来可做
 
-- vLLM 部署（应在 Linux/WSL2 的 NVIDIA GPU 环境运行；vLLM 不适合直接在原生 Windows Python 环境中部署），以便高并发服务。先用 pip install vllm 或 Docker 准备 vLLM 运行环境；分别启动生成模型、embedding 模型、rerank 模型的 vLLM server；修改 .env，把对应模型名、API Key、Base URL 指向这三个服务（三个服务会分别占用显存。vLLM 的 serve 提供 Chat、Embedding 和 Rerank 接口）。
+- 当调用本地模型时，vLLM 部署加速推理（应在 Linux/WSL2 的 NVIDIA GPU 环境运行；vLLM 不适合直接在原生 Windows Python 环境中部署），以便高并发服务。先用 pip install vllm 或 Docker 准备 vLLM 运行环境；分别启动生成模型、embedding 模型、rerank 模型的 vLLM server；修改 .env，把对应模型名、API Key、Base URL 指向这三个服务（三个服务会分别占用显存。vLLM 的 serve 提供 Chat、Embedding 和 Rerank 接口）。
 
 ```bash
 pip install vllm
